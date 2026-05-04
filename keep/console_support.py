@@ -1679,7 +1679,30 @@ def _install_daemon_signal_handlers(*, logger, port_path: Path, token_path: Path
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
+    _install_daemon_stack_dump_signal(logger)
     return state
+
+
+def _install_daemon_stack_dump_signal(logger) -> None:
+    """Register a non-terminating signal for live daemon stack diagnostics.
+
+    The daemon redirects stderr to keep-ops.log, so SIGUSR1 gives operators a
+    cheap way to capture all Python thread stacks while a process is still
+    wedged.  This complements slow SQLite query fingerprints, which only help
+    once the relevant statement reaches Python code.
+    """
+    signum = getattr(signal, "SIGUSR1", None)
+    if signum is None:
+        logger.debug("SIGUSR1 unavailable; daemon stack dump signal disabled")
+        return
+    try:
+        import faulthandler
+
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+        faulthandler.register(signum, file=sys.stderr, all_threads=True, chain=False)
+        logger.info("Daemon stack dumps enabled: kill -USR1 %d", os.getpid())
+    except Exception as exc:
+        logger.warning("Failed to install daemon stack dump signal: %s", exc)
 
 
 def _release_stale_daemon_leases(kp, flow_worker_id: str, daemon_logger) -> None:

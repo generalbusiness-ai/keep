@@ -253,23 +253,16 @@ class TestRuntimeRecovery:
         db_path = tmp_path / "test.db"
         store = DocumentStore(db_path)
 
-        original_conn = store._conn
-        original_execute = original_conn.execute
-
-        class FailingConn:
-            def __getattr__(self, name):
-                return getattr(original_conn, name)
-
-            def execute(self, sql, *args, **kwargs):
-                if "PRAGMA quick_check" in str(sql):
-                    raise sqlite3.DatabaseError("database disk image is malformed")
-                return original_execute(sql, *args, **kwargs)
-
-        store._conn = FailingConn()
-        with patch.object(store, "_recover_malformed", side_effect=Exception("boom")):
+        with (
+            patch.object(
+                store,
+                "_open_connection",
+                side_effect=sqlite3.DatabaseError("database disk image is malformed"),
+            ),
+            patch.object(store, "_recover_malformed", side_effect=Exception("boom")),
+        ):
             result = store._try_runtime_recover()
             assert result is False
-        store._conn = original_conn
 
     def test_try_runtime_recover_returns_true_on_success(self, tmp_path):
         """_try_runtime_recover returns True when recovery succeeds."""
@@ -280,6 +273,82 @@ class TestRuntimeRecovery:
         with patch.object(store, "_recover_malformed"):
             result = store._try_runtime_recover()
             assert result is True
+
+    def test_runtime_recover_reopens_connections_even_when_quick_check_ok(self, tmp_path):
+        """Runtime recovery should not reuse the connection that reported malformation."""
+        db_path = tmp_path / "test.db"
+        store = DocumentStore(db_path)
+        store.upsert("default", "doc1", "hello", {})
+        generation = store._connection_generation
+
+        result = store._try_runtime_recover()
+
+        assert result is True
+        assert store._connection_generation > generation
+        assert store.get("default", "doc1") is not None
+
+    def test_malformed_fetch_invalidates_connection_generation(self, tmp_path):
+        """A malformed sqlite3 error immediately invalidates thread-local handles."""
+        db_path = tmp_path / "test.db"
+        store = DocumentStore(db_path)
+        generation = store._connection_generation
+        original_conn = store._conn
+        original_execute = original_conn.execute
+
+        class FailingConn:
+            """Proxy that raises a malformed error for one SELECT."""
+
+            def __getattr__(self, name):
+                return getattr(original_conn, name)
+
+            def execute(self, sql, *args, **kwargs):
+                if "SELECT 1" in str(sql):
+                    raise sqlite3.DatabaseError("database disk image is malformed")
+                return original_execute(sql, *args, **kwargs)
+
+        store._conn = FailingConn()
+
+        with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+            store._fetchone("SELECT 1")
+
+        assert store._connection_generation > generation
+
+    def test_slow_sql_logs_sanitized_fingerprint(self, tmp_path, caplog):
+        """Slow statement diagnostics include a fingerprint and not raw params."""
+        db_path = tmp_path / "test.db"
+        store = DocumentStore(db_path)
+        store._sqlite_slow_ms = 0
+
+        with caplog.at_level("WARNING"):
+            store._fetchone("SELECT ? AS value", ("secret-note-content",))
+
+        assert "SQLite statement slow" in caplog.text
+        assert "fingerprint=" in caplog.text
+        assert "callsite=" in caplog.text
+        assert "secret-note-content" not in caplog.text
+
+    def test_keeper_get_raises_when_runtime_recovery_fails(self, tmp_path, mock_providers):
+        """Malformed canonical reads should not silently fall back to Chroma."""
+        kp = Keeper(store_path=tmp_path)
+        try:
+            kp.put(content="hello", id="doc1")
+            with (
+                patch.object(
+                    kp._document_store,
+                    "get",
+                    side_effect=sqlite3.DatabaseError("database disk image is malformed"),
+                ),
+                patch.object(
+                    kp._document_store,
+                    "_try_runtime_recover",
+                    return_value=False,
+                    create=True,
+                ),
+            ):
+                with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+                    kp._get_direct("doc1")
+        finally:
+            kp.close()
 
 
 class TestUnicodeRepair:

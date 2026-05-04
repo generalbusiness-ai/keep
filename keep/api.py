@@ -4713,14 +4713,22 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                 if self._is_local and is_malformed_db_error(e):
                     span.set_attribute("recovered", True)
                     # SQLite-specific recovery — only for local backends
+                    recovered = False
                     if hasattr(self._document_store, '_try_runtime_recover'):
-                        self._document_store._try_runtime_recover()
+                        recovered = bool(self._document_store._try_runtime_recover())
+                    if not recovered:
+                        # Do not hide a malformed canonical store behind the
+                        # Chroma fallback.  Serving stale vector data after
+                        # SQLite malformation makes daemon state harder to
+                        # diagnose and can leave request threads piling up.
+                        raise
                     # Retry once after recovery
                     try:
                         with _get_tracer("keeper").start_as_current_span("doc_store.get.retry"):
                             doc_record = self._document_store.get(doc_coll, id)
                     except Exception:
-                        doc_record = None
+                        logger.exception("DocumentStore.get(%s) failed after recovery", id)
+                        raise
                 else:
                     doc_record = None
             if doc_record:

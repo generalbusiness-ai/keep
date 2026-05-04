@@ -144,6 +144,19 @@ client-facing error.
 Storage tracing records operation names and low-cardinality metadata only; it
 does not attach raw SQL or note content to trace attributes.
 
+If the daemon is alive but requests are hanging, send `SIGUSR1` to capture all
+Python thread stacks in the daemon log:
+
+```bash
+kill -USR1 "$(cat ~/.keep/processor.pid)"
+```
+
+For custom store paths, use that store's `processor.pid` file. The signal does
+not stop the daemon. SQLite statements that run longer than the diagnostic
+threshold are also logged with a sanitized query shape, fingerprint, parameter
+count, and callsite. Adjust thresholds with `KEEP_SQLITE_SLOW_MS` and
+`KEEP_SQLITE_PROGRESS_MS`.
+
 ### Restarting the daemon
 
 ```bash

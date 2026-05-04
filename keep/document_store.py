@@ -14,8 +14,12 @@ Embeddings are stored in ChromaDB collections, keyed by embedding provider.
 
 import json
 import logging
+import os
+import re
 import sqlite3
 import threading
+import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +43,20 @@ logger = logging.getLogger(__name__)
 
 # Schema version for migrations
 SCHEMA_VERSION = 16
+DEFAULT_SQLITE_SLOW_MS = 1000.0
+DEFAULT_SQLITE_PROGRESS_MS = 5000.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float environment setting without letting bad values break startup."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %.1f", name, raw, default)
+        return default
 
 
 def _sql_operation(sql: str) -> str:
@@ -53,6 +71,35 @@ def _is_readonly_sql(sql: str) -> bool:
     """Return True for statements that can safely bypass the store write lock."""
     operation = _sql_operation(sql)
     return operation in {"SELECT", "EXPLAIN"}
+
+
+def _sql_shape(sql: str) -> str:
+    """Return a sanitized, stable SQL shape for diagnostics.
+
+    Query diagnostics need to identify the statement without logging note
+    content.  The helpers below collapse literal values and whitespace, leaving
+    table/column names and placeholders visible enough to locate the callsite.
+    """
+    shape = re.sub(r"'(?:''|[^'])*'", "?", sql)
+    shape = re.sub(r'"(?:""|[^"])*"', "?", shape)
+    shape = re.sub(r"\b\d+(?:\.\d+)?\b", "?", shape)
+    return re.sub(r"\s+", " ", shape).strip()
+
+
+def _sql_fingerprint(sql: str) -> str:
+    """Return a compact fingerprint of the sanitized SQL shape."""
+    import hashlib
+
+    return hashlib.sha256(_sql_shape(sql).encode("utf-8")).hexdigest()[:12]
+
+
+def _sql_callsite() -> str:
+    """Return the first non-DocumentStore Python frame for SQL diagnostics."""
+    for frame in reversed(traceback.extract_stack(limit=16)[:-2]):
+        if Path(frame.filename).name != "document_store.py":
+            return f"{Path(frame.filename).name}:{frame.lineno}"
+    frame = traceback.extract_stack(limit=3)[0]
+    return f"{Path(frame.filename).name}:{frame.lineno}"
 
 
 def _load_tags_json(
@@ -163,13 +210,18 @@ class DocumentStore:
         """
         self._db_path = store_path
         self._local = threading.local()
-        self._connections: set[sqlite3.Connection] = set()
+        self._connections: set[Any] = set()
         self._connections_lock = threading.RLock()
+        self._connection_generation = 0
         self._closed = False
         self._lock = threading.RLock()
         self._fts_available = False
         self._stopwords: Optional[frozenset[str]] = None
         self.migrated_parts_for_reindex: list[dict[str, Any]] = []
+        self._sqlite_slow_ms = _env_float("KEEP_SQLITE_SLOW_MS", DEFAULT_SQLITE_SLOW_MS)
+        self._sqlite_progress_ms = _env_float(
+            "KEEP_SQLITE_PROGRESS_MS", DEFAULT_SQLITE_PROGRESS_MS,
+        )
         try:
             self._init_db()
         except sqlite3.DatabaseError as e:
@@ -200,11 +252,20 @@ class DocumentStore:
         ``check_same_thread`` is disabled, so each thread gets its own handle.
         """
         conn = getattr(self._local, "conn", None)
-        if conn is None:
+        generation = getattr(self._local, "conn_generation", -1)
+        if conn is None or generation != self._connection_generation:
+            if conn is not None:
+                with self._connections_lock:
+                    self._connections.discard(conn)
+                try:
+                    conn.close()
+                except Exception:
+                    logger.debug("Failed to close stale SQLite connection", exc_info=True)
             if self._closed:
                 raise sqlite3.ProgrammingError("DocumentStore is closed")
             conn = self._open_connection()
             self._local.conn = conn
+            self._local.conn_generation = self._connection_generation
             with self._connections_lock:
                 self._connections.add(conn)
         return conn
@@ -217,12 +278,14 @@ class DocumentStore:
             with self._connections_lock:
                 self._connections.discard(old)
         self._local.conn = conn
+        self._local.conn_generation = self._connection_generation
         if conn is not None:
             with self._connections_lock:
                 self._connections.add(conn)
 
     def _close_all_connections(self, *, mark_closed: bool) -> None:
         with self._connections_lock:
+            self._connection_generation += 1
             connections = list(self._connections)
             self._connections.clear()
         for conn in connections:
@@ -235,8 +298,89 @@ class DocumentStore:
                     exc_info=True,
                 )
         self._local.conn = None
+        self._local.conn_generation = self._connection_generation
         if mark_closed:
             self._closed = True
+
+    def _log_sqlite_runtime(
+        self,
+        *,
+        message: str,
+        level: int,
+        sql: str,
+        params: tuple,
+        started: float,
+        callsite: str,
+    ) -> None:
+        """Log a sanitized SQLite runtime diagnostic."""
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        logger.log(
+            level,
+            "%s elapsed_ms=%.1f op=%s fingerprint=%s params=%d callsite=%s shape=%s",
+            message,
+            elapsed_ms,
+            _sql_operation(sql),
+            _sql_fingerprint(sql),
+            len(params),
+            callsite,
+            _sql_shape(sql)[:240],
+        )
+
+    def _run_sql(self, *, sql: str, params: tuple, materialize) -> Any:
+        """Run one SQLite operation with slow-query and malformed-DB diagnostics."""
+        conn = self._conn
+        started = time.monotonic()
+        callsite = _sql_callsite()
+        progress_every = max(self._sqlite_progress_ms / 1000.0, 0.0)
+        next_progress_log = started + progress_every if progress_every else 0.0
+
+        def progress() -> int:
+            nonlocal next_progress_log
+            now = time.monotonic()
+            if next_progress_log and now >= next_progress_log:
+                self._log_sqlite_runtime(
+                    message="SQLite statement still running",
+                    level=logging.WARNING,
+                    sql=sql,
+                    params=params,
+                    started=started,
+                    callsite=callsite,
+                )
+                next_progress_log = now + progress_every
+            return 0
+
+        try:
+            if progress_every:
+                conn.set_progress_handler(progress, 10_000)
+            return materialize(conn)
+        except sqlite3.DatabaseError as exc:
+            if is_malformed_db_error(exc):
+                logger.error(
+                    "SQLite malformed error; invalidating all document-store "
+                    "connections op=%s fingerprint=%s callsite=%s: %s",
+                    _sql_operation(sql),
+                    _sql_fingerprint(sql),
+                    callsite,
+                    exc,
+                )
+                self._close_all_connections(mark_closed=False)
+            raise
+        finally:
+            try:
+                conn.set_progress_handler(None, 0)
+            except Exception:
+                logger.debug("Failed to clear SQLite progress handler", exc_info=True)
+            if self._sqlite_slow_ms >= 0:
+                elapsed_ms = (time.monotonic() - started) * 1000.0
+                if elapsed_ms >= self._sqlite_slow_ms:
+                    self._log_sqlite_runtime(
+                        message="SQLite statement slow",
+                        level=logging.WARNING,
+                        sql=sql,
+                        params=params,
+                        started=started,
+                        callsite=callsite,
+                    )
     
     def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         """Execute SQL with thread-safety.
@@ -255,9 +399,17 @@ class DocumentStore:
             },
         ):
             if _is_readonly_sql(sql):
-                return self._conn.execute(sql, params)
+                return self._run_sql(
+                    sql=sql,
+                    params=params,
+                    materialize=lambda conn: conn.execute(sql, params),
+                )
             with self._lock:
-                return self._conn.execute(sql, params)
+                return self._run_sql(
+                    sql=sql,
+                    params=params,
+                    materialize=lambda conn: conn.execute(sql, params),
+                )
 
     def _fetchone(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
         """Execute SQL and materialize one row within the chosen lock scope."""
@@ -270,9 +422,17 @@ class DocumentStore:
             },
         ):
             if _is_readonly_sql(sql):
-                return self._conn.execute(sql, params).fetchone()
+                return self._run_sql(
+                    sql=sql,
+                    params=params,
+                    materialize=lambda conn: conn.execute(sql, params).fetchone(),
+                )
             with self._lock:
-                return self._conn.execute(sql, params).fetchone()
+                return self._run_sql(
+                    sql=sql,
+                    params=params,
+                    materialize=lambda conn: conn.execute(sql, params).fetchone(),
+                )
 
     def _fetchall(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         """Execute SQL and materialize all rows within the chosen lock scope."""
@@ -285,9 +445,17 @@ class DocumentStore:
             },
         ):
             if _is_readonly_sql(sql):
-                return self._conn.execute(sql, params).fetchall()
+                return self._run_sql(
+                    sql=sql,
+                    params=params,
+                    materialize=lambda conn: conn.execute(sql, params).fetchall(),
+                )
             with self._lock:
-                return self._conn.execute(sql, params).fetchall()
+                return self._run_sql(
+                    sql=sql,
+                    params=params,
+                    materialize=lambda conn: conn.execute(sql, params).fetchall(),
+                )
 
     def _execute_write(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         """Execute a mutating statement under the store write lock."""
@@ -300,7 +468,11 @@ class DocumentStore:
             },
         ):
             with self._lock:
-                return self._conn.execute(sql, params)
+                return self._run_sql(
+                    sql=sql,
+                    params=params,
+                    materialize=lambda conn: conn.execute(sql, params),
+                )
 
     def _executemany(self, sql: str, params_seq) -> sqlite3.Cursor:
         """Like _execute but for executemany."""
@@ -317,7 +489,11 @@ class DocumentStore:
             attributes=attributes,
         ):
             with self._lock:
-                return self._conn.executemany(sql, params_seq)
+                return self._run_sql(
+                    sql=sql,
+                    params=(),
+                    materialize=lambda conn: conn.executemany(sql, params_seq),
+                )
 
     def _init_db(self) -> None:
         """Initialize the SQLite database."""
@@ -1364,6 +1540,15 @@ class DocumentStore:
         """
         with self._lock:
             try:
+                # A malformed error can be WAL/session-local.  Invalidate every
+                # thread-local handle before quick_check so the retry does not
+                # reuse the same poisoned sqlite3 connection that reported it.
+                logger.warning(
+                    "Runtime database malformation detected; reopening SQLite "
+                    "connections before health check: %s",
+                    self._db_path,
+                )
+                self._close_all_connections(mark_closed=False)
                 try:
                     result = self._conn.execute("PRAGMA quick_check").fetchone()
                 except sqlite3.DatabaseError as quick_check_err:
@@ -1372,13 +1557,13 @@ class DocumentStore:
                 else:
                     if result and result[0] == "ok":
                         logger.info(
-                            "Runtime recovery skipped; database already healthy: %s",
+                            "Runtime recovery completed by reopening healthy database: %s",
                             self._db_path,
                         )
                         return True
 
                 logger.warning(
-                    "Runtime database malformation detected, attempting recovery: %s",
+                    "Runtime database still malformed after reopen, attempting recovery: %s",
                     self._db_path,
                 )
                 self._recover_malformed()
