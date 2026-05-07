@@ -2940,14 +2940,29 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
 
         if embed:
             chroma_coll = self._resolve_chroma_collection()
-            embedding = self._get_embedding_provider().embed(summary)
-            self._store.upsert(
-                collection=chroma_coll,
-                id=target,
-                embedding=embedding,
-                summary=summary,
-                tags=casefold_tags_for_index(existing_tags),
-            )
+            try:
+                embedding = self._get_embedding_provider().embed(summary)
+                self._store.upsert(
+                    collection=chroma_coll,
+                    id=target,
+                    embedding=embedding,
+                    summary=summary,
+                    tags=casefold_tags_for_index(existing_tags),
+                )
+            except Exception as e:
+                self._store.delete_entries(chroma_coll, [target])
+                logger.warning(
+                    "Embedding unavailable for summary mutation %s; queued reindex: %s",
+                    target,
+                    e,
+                )
+                self._pending_queue.enqueue(
+                    target,
+                    collection,
+                    summary,
+                    task_type="reindex",
+                    metadata={"tags": dict(existing_tags)},
+                )
         else:
             self._store.update_summary(collection, target, summary)
 
@@ -3199,31 +3214,41 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         # embeddings are filled in by reconciliation when a provider appears).
         _tracer = _get_tracer("keeper")
         embedding = None
+        embedding_error: Exception | None = None
         if should_index:
             with _tracer.start_as_current_span("embed", attributes={"item_id": id}) as _embed_span:
                 _embed_source = "compute"
-                if content_unchanged:
-                    embedding = self._store.get_embedding(chroma_coll, id)
-                    if embedding is not None:
-                        _embed_source = "existing"
-                    if embedding is None:
-                        embedding = self._try_dedup_embedding(
-                            doc_coll, chroma_coll, new_hash, id, content,
-                        )
+                try:
+                    if content_unchanged:
+                        embedding = self._store.get_embedding(chroma_coll, id)
                         if embedding is not None:
-                            _embed_source = "dedup"
-                    if embedding is None:
-                        embedding = self._get_embedding_provider().embed(final_summary)
-                else:
-                    if restored_embedding is not None:
-                        embedding = restored_embedding
-                        _embed_source = "restored_version"
+                            _embed_source = "existing"
+                        if embedding is None:
+                            embedding = self._try_dedup_embedding(
+                                doc_coll, chroma_coll, new_hash, id, content,
+                            )
+                            if embedding is not None:
+                                _embed_source = "dedup"
+                        if embedding is None:
+                            embedding = self._get_embedding_provider().embed(final_summary)
                     else:
-                        embedding = self._try_dedup_embedding(doc_coll, chroma_coll, new_hash, id, content)
-                        if embedding is not None:
-                            _embed_source = "dedup"
-                    if embedding is None:
-                        embedding = self._get_embedding_provider().embed(final_summary)
+                        if restored_embedding is not None:
+                            embedding = restored_embedding
+                            _embed_source = "restored_version"
+                        else:
+                            embedding = self._try_dedup_embedding(doc_coll, chroma_coll, new_hash, id, content)
+                            if embedding is not None:
+                                _embed_source = "dedup"
+                        if embedding is None:
+                            embedding = self._get_embedding_provider().embed(final_summary)
+                except Exception as e:
+                    embedding_error = e
+                    _embed_source = "deferred"
+                    logger.warning(
+                        "Embedding unavailable for %s; storing note and queued reindex: %s",
+                        id,
+                        e,
+                    )
                 _embed_span.set_attribute("source", _embed_source)
 
         # Detect _inverse changes on tagdocs BEFORE storage overwrites old state
@@ -3251,7 +3276,36 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                 created_at=created_at,
             )
 
-        if should_index:
+        if should_index and embedding is None:
+            # The document store is canonical. Remove any stale vector row so
+            # semantic search cannot keep returning the old embedding/summary
+            # while the replacement embedding is waiting on provider recovery.
+            self._store.delete_entries(chroma_coll, [id])
+            self._pending_queue.enqueue(
+                id,
+                doc_coll,
+                final_summary,
+                task_type="reindex",
+                metadata={"tags": dict(merged_tags)},
+            )
+            if embedding_error is not None:
+                logger.debug("Deferred reindex for %s after embedding error: %s", id, embedding_error)
+            if existing_doc is not None and content_changed:
+                max_ver = self._document_store.max_version(doc_coll, id)
+                if max_ver > 0:
+                    self._pending_queue.enqueue(
+                        f"{id}@v{max_ver}",
+                        doc_coll,
+                        existing_doc.summary,
+                        task_type="reindex",
+                        metadata={
+                            "version": max_ver,
+                            "base_id": id,
+                            "tags": dict(existing_doc.tags),
+                        },
+                    )
+
+        if should_index and embedding is not None:
             # If content changed and we have a version to archive, batch both
             # ChromaDB writes into a single call (one lock, one epoch bump).
             max_ver = (

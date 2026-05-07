@@ -1484,6 +1484,7 @@ def run_pending_daemon(
     _REPLENISH_INTERVAL = 1800
     _last_replenish_ts = _load_daemon_replenish_timestamp(kp._store_path)
     _pending_batch_limit = 64
+    _consecutive_failure_ticks = 0
 
     _version_file = kp._store_path / ".processor.version"
 
@@ -1556,6 +1557,18 @@ def run_pending_daemon(
                 delegated=delegated,
                 flow_result=flow_result,
             )
+            if _daemon_only_failed(result=result, delegated=delegated, flow_result=flow_result):
+                _consecutive_failure_ticks += 1
+                delay = _daemon_failure_backoff_seconds(_consecutive_failure_ticks)
+                _daemon_logger.info(
+                    "Daemon failures only; backing off %.1fs before next tick",
+                    delay,
+                )
+                wait_or_shutdown(delay)
+                if shutdown_state["requested"]:
+                    break
+                continue
+            _consecutive_failure_ticks = 0
             flow_activity = _daemon_has_flow_activity(flow_result)
             if result["processed"] == 0 and result["failed"] == 0 and delegated == 0 and not flow_activity:
                 if _maybe_wait_for_daemon_idle(
@@ -1868,6 +1881,37 @@ def _daemon_has_flow_activity(flow_result: dict[str, Any]) -> bool:
         or int(flow_result.get("failed", 0)) > 0
         or int(flow_result.get("dead_lettered", 0)) > 0
     )
+
+
+def _daemon_only_failed(*, result: dict[str, Any], delegated: int, flow_result: dict[str, Any]) -> bool:
+    """Return whether the tick did no useful work and only recorded failures.
+
+    Provider outages can fail immediately across many queued notes.  A small
+    daemon-level pause keeps those retry loops from monopolizing CPU while the
+    per-item queue backoff records the actual retry schedule.
+    """
+    pending_processed = int(result.get("processed", 0))
+    pending_failed = int(result.get("failed", 0))
+    flow_processed = int(flow_result.get("processed", 0))
+    flow_failed = int(flow_result.get("failed", 0)) + int(flow_result.get("dead_lettered", 0))
+    return (
+        pending_processed == 0
+        and flow_processed == 0
+        and int(delegated) == 0
+        and (pending_failed + flow_failed) > 0
+    )
+
+
+def _daemon_failure_backoff_seconds(
+    consecutive_failures: int,
+    *,
+    base: float = 0.5,
+    cap: float = 8.0,
+) -> float:
+    """Short exponential cooldown for provider-outage failure loops."""
+    failures = max(int(consecutive_failures), 1)
+    delay = float(base) * (2 ** (failures - 1))
+    return min(delay, float(cap))
 
 
 def _log_daemon_batch_result(*, logger, result: dict[str, Any], delegated: int, flow_result: dict[str, Any], drain: bool = False) -> None:

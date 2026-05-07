@@ -1146,15 +1146,23 @@ class BackgroundProcessingMixin:
                 text_to_entries[summary] = [entry]
 
             if pending_texts:
-                provider = self._get_embedding_provider()
-                used_embedding_provider = True
                 try:
-                    batch_embeddings = provider.embed_batch(
-                        pending_texts,
-                        task=EmbedTask.DOCUMENT,
-                    )
-                    for summary, embedding in zip(pending_texts, batch_embeddings):
-                        embeddings_by_summary[summary] = embedding
+                    provider = self._get_embedding_provider()
+                    used_embedding_provider = True
+                except Exception as e:
+                    error_msg = f"{type(e).__name__}: {e}"
+                    for summary in pending_texts:
+                        for entry in text_to_entries.get(summary, []):
+                            _fail_item(entry["item"], error_msg)
+                    pending_texts = []
+                try:
+                    if pending_texts:
+                        batch_embeddings = provider.embed_batch(
+                            pending_texts,
+                            task=EmbedTask.DOCUMENT,
+                        )
+                        for summary, embedding in zip(pending_texts, batch_embeddings):
+                            embeddings_by_summary[summary] = embedding
                 except Exception as e:
                     logger.warning(
                         "Batch reindex embed failed, falling back to per-summary embed: %s",

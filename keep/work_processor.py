@@ -108,6 +108,13 @@ def process_work_batch(
                 logger.info("Paused flow %s for resume", target)
                 stats["processed"] += 1
                 continue
+            flow_retry_reason = _flow_retry_reason(details)
+            if item.kind == "flow" and flow_retry_reason:
+                # State-doc evaluation reports user/action failures as a
+                # FlowResult instead of throwing. Convert only transient
+                # provider outages back into queue failure semantics; permanent
+                # validation/action errors should complete with their details.
+                raise RuntimeError(flow_retry_reason)
             queue.complete(item.work_id, outcome)
             if status == "skipped":
                 logger.info("Skipped %s %s: %s", item.kind, target, details or "")
@@ -132,6 +139,60 @@ def process_work_batch(
             logger.info("Queue: %d remaining (%s)", remaining, ", ".join(parts))
 
     return stats
+
+
+def _flow_retry_reason(details: Any) -> str:
+    """Extract a retryable provider-outage reason from a daemon flow outcome."""
+    if not isinstance(details, dict):
+        return ""
+    data = details.get("data")
+    if not isinstance(data, dict):
+        return ""
+    direct = str(data.get("reason") or data.get("error") or "").strip()
+    if direct and _is_retryable_provider_error(direct):
+        return direct
+    for rule_id, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        error = str(value.get("error") or "").strip()
+        if error and _is_retryable_provider_error(error):
+            return f"{rule_id}: {error}"
+    return ""
+
+
+def _is_retryable_provider_error(message: str) -> bool:
+    """Return whether an action error looks like a transient provider outage."""
+    text = str(message or "").lower()
+    if not text:
+        return False
+    provider_marker = (
+        "provider" in text
+        or "ollama" in text
+        or "openai" in text
+        or "voyage" in text
+        or "gemini" in text
+        or "mistral" in text
+    )
+    transient_marker = any(
+        marker in text for marker in (
+            "cannot reach",
+            "connection refused",
+            "connection reset",
+            "connection timed out",
+            "connecterror",
+            "read timed out",
+            "timeout",
+            "temporarily unavailable",
+            "service unavailable",
+            "rate limit",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+    )
+    return provider_marker and transient_marker
 
 
 def _execute_work_item(

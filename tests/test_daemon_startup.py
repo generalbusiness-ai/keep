@@ -213,3 +213,32 @@ def test_log_daemon_batch_result_logs_activity():
         0,
         0,
     )
+
+
+def test_daemon_only_failed_detects_provider_outage_tick():
+    from keep.console_support import _daemon_only_failed
+
+    assert _daemon_only_failed(
+        result={"processed": 0, "failed": 0},
+        delegated=0,
+        flow_result={"processed": 0, "failed": 1, "dead_lettered": 0},
+    )
+
+
+def test_daemon_only_failed_ignores_mixed_progress():
+    from keep.console_support import _daemon_only_failed
+
+    assert not _daemon_only_failed(
+        result={"processed": 1, "failed": 0},
+        delegated=0,
+        flow_result={"processed": 0, "failed": 1, "dead_lettered": 0},
+    )
+
+
+def test_daemon_failure_backoff_caps_under_thirty_seconds():
+    from keep.console_support import _daemon_failure_backoff_seconds
+
+    assert _daemon_failure_backoff_seconds(1) == 0.5
+    assert _daemon_failure_backoff_seconds(2) == 1.0
+    assert _daemon_failure_backoff_seconds(5) == 8.0
+    assert _daemon_failure_backoff_seconds(20) == 8.0

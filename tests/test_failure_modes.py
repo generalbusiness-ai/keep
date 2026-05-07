@@ -420,6 +420,53 @@ class TestProcessPendingRetry:
 
         kp.close()
 
+    def test_reindex_provider_creation_failure_uses_queue_backoff(self, mock_providers, tmp_path):
+        """Reindex batches should not crash the daemon when embeddings are offline."""
+        kp = self._make_keeper(mock_providers, tmp_path)
+        kp._pending_queue.enqueue("doc1", "default", "summary", task_type="reindex")
+        kp._document_store.upsert("default", "doc1", "raw content", {})
+
+        with patch.object(kp, "_get_embedding_provider", side_effect=RuntimeError("offline")):
+            result = kp.process_pending(limit=10)
+
+        assert result["failed"] == 1
+        assert result["processed"] == 0
+        row = kp._pending_queue._conn.execute(
+            "SELECT status, retry_after, last_error FROM pending_summaries WHERE id = 'doc1'"
+        ).fetchone()
+        assert row[0] == "pending"
+        assert row[1] is not None
+        assert "offline" in row[2]
+
+        kp.close()
+
+    def test_reindex_provider_creation_failure_preserves_deduped_writes(self, mock_providers, tmp_path):
+        """Provider outages should not fail entries that already have reusable embeddings."""
+        kp = self._make_keeper(mock_providers, tmp_path)
+        kp._pending_queue.enqueue("deduped", "default", "deduped summary", task_type="reindex")
+        kp._pending_queue.enqueue("needs-provider", "default", "unique summary", task_type="reindex")
+        kp._document_store.upsert("default", "deduped", "deduped summary", {})
+        kp._document_store.upsert("default", "needs-provider", "unique summary", {})
+
+        embedding = [0.2] * mock_providers["embedding"].dimension
+        with (
+            patch.object(kp, "_try_dedup_embedding", side_effect=[embedding, None]),
+            patch.object(kp, "_get_embedding_provider", side_effect=RuntimeError("offline")),
+        ):
+            result = kp.process_pending(limit=10)
+
+        assert result["processed"] == 1
+        assert result["failed"] == 1
+        chroma_coll = kp._resolve_chroma_collection()
+        assert kp._store.get(chroma_coll, "deduped") is not None
+        row = kp._pending_queue._conn.execute(
+            "SELECT status, retry_after FROM pending_summaries WHERE id = 'needs-provider'"
+        ).fetchone()
+        assert row[0] == "pending"
+        assert row[1] is not None
+
+        kp.close()
+
 
 # ---------------------------------------------------------------------------
 # Provider timeout propagation

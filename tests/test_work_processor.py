@@ -154,6 +154,73 @@ class TestProcessWorkBatch:
         assert resumed[0].supersede_key == "flow:doc1"
         assert resumed[0].input["cursor"] == "cursor-123"
 
+    def test_error_flow_is_failed_for_retry_backoff(self, mock_keeper, queue):
+        queue.enqueue(
+            "flow",
+            {"state": "after-write", "params": {}, "item_id": "doc1"},
+            supersede_key="flow:doc1",
+            priority=3,
+        )
+        with patch("keep.work_processor._execute_work_item", return_value={
+            "status": "error",
+            "state": "after-write",
+            "details": {"data": {"reason": "Cannot reach Ollama at http://localhost:11434"}},
+        }):
+            stats = process_work_batch(mock_keeper, queue, limit=5, worker_id="w1")
+
+        assert stats["failed"] == 1
+        assert stats["processed"] == 0
+        row = queue._conn.execute(
+            "SELECT status, retry_after, last_error FROM continue_work"
+        ).fetchone()
+        assert row["status"] == "requested"
+        assert row["retry_after"]
+        assert "Cannot reach Ollama" in row["last_error"]
+
+    def test_done_flow_with_action_error_is_failed_for_retry_backoff(self, mock_keeper, queue):
+        queue.enqueue(
+            "flow",
+            {"state": "after-write", "params": {}, "item_id": "doc1"},
+            supersede_key="flow:doc1",
+            priority=3,
+        )
+        with patch("keep.work_processor._execute_work_item", return_value={
+            "status": "done",
+            "state": "after-write",
+            "details": {"data": {"summary": {"error": "Cannot reach Ollama at http://localhost:11434"}}},
+        }):
+            stats = process_work_batch(mock_keeper, queue, limit=5, worker_id="w1")
+
+        assert stats["failed"] == 1
+        row = queue._conn.execute(
+            "SELECT status, retry_after, last_error FROM continue_work"
+        ).fetchone()
+        assert row["status"] == "requested"
+        assert row["retry_after"]
+        assert "summary: Cannot reach Ollama" in row["last_error"]
+
+    def test_done_flow_with_validation_error_completes(self, mock_keeper, queue):
+        queue.enqueue(
+            "flow",
+            {"state": "after-write", "params": {}, "item_id": "doc1"},
+            supersede_key="flow:doc1",
+            priority=3,
+        )
+        with patch("keep.work_processor._execute_work_item", return_value={
+            "status": "done",
+            "state": "after-write",
+            "details": {"data": {"summary": {"error": "item content unavailable: doc1"}}},
+        }):
+            stats = process_work_batch(mock_keeper, queue, limit=5, worker_id="w1")
+
+        assert stats["processed"] == 1
+        assert stats["failed"] == 0
+        row = queue._conn.execute(
+            "SELECT status, retry_after, last_error FROM continue_work"
+        ).fetchone()
+        assert row["status"] == "completed"
+        assert row["retry_after"] is None
+
 
 # ---------------------------------------------------------------------------
 # _execute_work_item

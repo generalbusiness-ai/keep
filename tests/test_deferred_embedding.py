@@ -6,6 +6,7 @@ and enqueue an "embed" task for the background worker instead.
 
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 import pytest
 
@@ -302,6 +303,85 @@ class TestLocalModeUnchanged:
         chroma_coll = kp._resolve_chroma_collection()
         vec = kp._store.get(chroma_coll, "doc1")
         assert vec is not None
+
+    def test_local_put_records_note_when_embedding_unavailable(self, mock_providers, tmp_path):
+        """Local put should preserve the note and queue reindex if embedding is offline."""
+        kp = Keeper(store_path=tmp_path)
+
+        # Warm system docs before simulating provider outage.
+        kp.put("warmup", id="_warmup")
+        kp.delete("_warmup")
+
+        with patch.object(kp, "_get_embedding_provider", side_effect=RuntimeError("offline")):
+            item = kp.put("hello world", id="doc-offline")
+
+        assert item.id == "doc-offline"
+        doc = kp._document_store.get("default", "doc-offline")
+        assert doc is not None
+        assert doc.summary == "hello world"
+
+        chroma_coll = kp._resolve_chroma_collection()
+        assert kp._store.get(chroma_coll, "doc-offline") is None
+
+        queued = [
+            item for item in kp._pending_queue._queue
+            if item["id"] == "doc-offline"
+        ]
+        assert len(queued) == 1
+        assert queued[0]["task_type"] == "reindex"
+
+    def test_local_put_removes_stale_vector_when_reindex_deferred(self, mock_providers, tmp_path):
+        """Updating an indexed note offline should not leave the old vector row live."""
+        kp = Keeper(store_path=tmp_path)
+
+        kp.put("old summary", id="doc-stale")
+        chroma_coll = kp._resolve_chroma_collection()
+        kp._store.upsert(
+            collection=chroma_coll,
+            id="doc-stale",
+            embedding=[0.1] * mock_providers["embedding"].dimension,
+            summary="old summary",
+            tags={},
+        )
+        assert kp._store.get(chroma_coll, "doc-stale") is not None
+
+        with patch.object(kp, "_get_embedding_provider", side_effect=RuntimeError("offline")):
+            item = kp.put("new summary", id="doc-stale")
+
+        assert item.summary == "new summary"
+        doc = kp._document_store.get("default", "doc-stale")
+        assert doc is not None
+        assert doc.summary == "new summary"
+        assert kp._store.get(chroma_coll, "doc-stale") is None
+
+    def test_summary_mutation_removes_stale_vector_when_reindex_deferred(self, mock_providers, tmp_path):
+        """Derived summary updates should not keep stale embeddings when offline."""
+        kp = Keeper(store_path=tmp_path)
+
+        kp.put("old summary", id="doc-summary-stale")
+        chroma_coll = kp._resolve_chroma_collection()
+        kp._store.upsert(
+            collection=chroma_coll,
+            id="doc-summary-stale",
+            embedding=[0.2] * mock_providers["embedding"].dimension,
+            summary="old summary",
+            tags={},
+        )
+        assert kp._store.get(chroma_coll, "doc-summary-stale") is not None
+
+        with patch.object(kp, "_get_embedding_provider", side_effect=RuntimeError("offline")):
+            kp._apply_summary_mutation(
+                "default",
+                "doc-summary-stale",
+                "new summary",
+                intent="derived_summary_replace",
+                embed=True,
+            )
+
+        doc = kp._document_store.get("default", "doc-summary-stale")
+        assert doc is not None
+        assert doc.summary == "new summary"
+        assert kp._store.get(chroma_coll, "doc-summary-stale") is None
 
 
 class TestEmbeddingDedup:
