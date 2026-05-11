@@ -349,8 +349,26 @@ class DaemonRequestHandler(BaseHTTPRequestHandler):
                             "error": "internal server error",
                             "request_id": request_id,
                         })
+                    finally:
+                        self._release_request_resources()
                 return
         self._json(404, {"error": "not found"})
+
+    def _release_request_resources(self) -> None:
+        """Release resources that are scoped to this request thread."""
+        seen: set[int] = set()
+        for keeper in (self.keeper, self.export_keeper):
+            if keeper is None or id(keeper) in seen:
+                continue
+            seen.add(id(keeper))
+            doc_store = getattr(keeper, "_document_store", None)
+            release = getattr(doc_store, "release_thread_connection", None)
+            if release is None:
+                continue
+            try:
+                release()
+            except Exception:
+                logger.debug("Failed to release daemon request resources", exc_info=True)
 
     def do_GET(self):
         self._dispatch("GET")

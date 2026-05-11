@@ -392,6 +392,11 @@ class MockDocumentStore:
         self._parts: dict[str, list] = {}  # _parts:{collection}:{id} -> [PartInfo]
         self._sync_outbox: list[dict[str, Any]] = []
         self._next_sync_outbox_id = 1
+        self.release_thread_connection_calls = 0
+
+    def release_thread_connection(self) -> None:
+        """Mirror the real daemon request cleanup hook for tests."""
+        self.release_thread_connection_calls += 1
 
     def _make_record(self, collection: str, id: str, rec: dict) -> "DocumentRecord":
         from keep.document_store import DocumentRecord

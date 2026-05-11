@@ -302,6 +302,30 @@ class DocumentStore:
         if mark_closed:
             self._closed = True
 
+    def release_thread_connection(self) -> None:
+        """Close this thread's SQLite handle after a bounded unit of work.
+
+        The daemon creates a short-lived thread for each HTTP request.  Keeping
+        those request-thread connections in the store-wide connection set leaks
+        file descriptors until SQLite can no longer open databases under a
+        burst of requests.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            return
+        with self._connections_lock:
+            self._connections.discard(conn)
+        self._local.conn = None
+        self._local.conn_generation = self._connection_generation
+        try:
+            conn.close()
+        except Exception:
+            logger.debug(
+                "Failed to close SQLite request-thread connection for %s",
+                self._db_path,
+                exc_info=True,
+            )
+
     def _log_sqlite_runtime(
         self,
         *,

@@ -108,6 +108,42 @@ class TestConcurrentWrites:
         assert main_conn_id not in worker_conn_ids
         assert store.count("default") == 4
 
+    def test_release_thread_connection_closes_worker_handles(self, tmp_path):
+        """Request-thread cleanup must remove closed worker handles from tracking."""
+        from keep.document_store import DocumentStore
+
+        store = DocumentStore(tmp_path / "test.db")
+        store.upsert("default", "main", "main summary", {})
+        with store._connections_lock:
+            baseline = len(store._connections)
+        errors = []
+
+        def worker(worker_id: int):
+            try:
+                store.upsert(
+                    "default",
+                    f"thread-release:{worker_id}",
+                    f"thread release summary {worker_id}",
+                    {"worker": str(worker_id)},
+                )
+                store.release_thread_connection()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(i,))
+            for i in range(12)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        with store._connections_lock:
+            assert len(store._connections) == baseline
+        assert store.count("default") == 13
+
     def test_readers_do_not_wait_for_store_write_lock(self, tmp_path):
         """Pure SELECT reads can proceed while another thread holds _lock."""
         from keep.document_store import DocumentStore

@@ -79,6 +79,18 @@ def test_health(http):
     assert body["network"]["bind_host"] == "127.0.0.1"
 
 
+def test_request_threads_release_document_store_connections(daemon, http):
+    """Bursting daemon requests must not leak one SQLite handle per thread."""
+    _, kp, _ = daemon
+    baseline = kp._document_store.release_thread_connection_calls
+
+    for i in range(20):
+        r = http.post("/v1/notes", json={"content": f"burst note {i}", "id": f"burst-{i}"})
+        assert r.status_code == 200
+
+    assert kp._document_store.release_thread_connection_calls == baseline + 20
+
+
 def test_export_endpoint(http):
     http.post("/v1/notes", json={"content": "user note", "id": "export-1"})
     http.post("/v1/notes", json={"content": "system note", "id": ".system-export"})
