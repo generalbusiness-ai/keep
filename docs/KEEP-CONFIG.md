@@ -340,7 +340,7 @@ Run `keep doctor` to check your installation:
 keep doctor                           # Check providers, store, integrations
 ```
 
-**No embedding provider configured:** Set an API key (e.g., `VOYAGE_API_KEY`), install Ollama with models, or install `keep-skill[local]`.
+**No embedding provider configured:** Set an API key (e.g., `VOYAGE_API_KEY`), install and start Ollama, or install `keep-skill[local]`.
 
 **Model download hangs:** First use of local models downloads weights (~minutes). Cached in `~/.cache/`.
 

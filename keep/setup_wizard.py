@@ -263,13 +263,19 @@ def detect_summarization_choices(current: Optional[str] = None) -> list[dict[str
     # 1. Ollama
     ollama = _detect_ollama()
     if ollama:
-        # Filter out non-generative models (OCR, embedding, vision-only)
+        # Filter out non-generative models (OCR, embedding, vision-only).
+        # If the server is fresh and has no models yet, offer the configured
+        # default; the Ollama provider will pull it on first use.
         _non_generative = ("embed", "ocr", "moondream", "bakllava")
         gen_models = [
             m for m in ollama["models"]
             if not any(k in m.split(":")[0] for k in _non_generative)
         ]
-        chat_model = gen_models[0] if gen_models else None
+        chat_model = (
+            gen_models[0]
+            if gen_models
+            else get_default_provider_model("summarization", "ollama") if not ollama["models"] else None
+        )
         if chat_model:
             params: dict[str, Any] = {"model": chat_model}
             if ollama["base_url"] != "http://localhost:11434":

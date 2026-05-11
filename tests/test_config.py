@@ -6,6 +6,19 @@ from unittest.mock import patch
 import pytest
 
 
+class TestOllamaDetection:
+    """Tests for Ollama availability and model selection."""
+
+    def test_empty_model_list_uses_pullable_defaults(self) -> None:
+        """A fresh Ollama server should select models that can be pulled later."""
+        from keep.config import _ollama_pick_models
+
+        embed_model, chat_model = _ollama_pick_models([])
+
+        assert embed_model == "nomic-embed-text"
+        assert chat_model == "llama3.2"
+
+
 class TestEmbeddingProviderAbsent:
     """Tests for behavior when no embedding provider is configured."""
 

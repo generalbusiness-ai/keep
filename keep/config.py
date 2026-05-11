@@ -342,8 +342,10 @@ def _detect_ollama() -> dict | None:
     Respects OLLAMA_HOST environment variable (default: http://localhost:11434).
     Uses a short timeout (0.5s) to avoid blocking during provider detection.
 
-    Returns dict with 'base_url' and 'models' if Ollama is reachable
-    with at least one model, None otherwise.
+    Returns dict with 'base_url' and 'models' if Ollama is reachable,
+    None otherwise.  A freshly installed Ollama server can return an empty
+    model list; keep still treats that as available because provider startup
+    pulls configured default models on first use.
     """
     base_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
     if not base_url.startswith("http"):
@@ -358,8 +360,7 @@ def _detect_ollama() -> dict | None:
         with urllib.request.urlopen(req, timeout=0.5) as resp:
             data = json.loads(resp.read())
             models = [m["name"] for m in data.get("models", [])]
-            if models:
-                return {"base_url": base_url, "models": models}
+            return {"base_url": base_url, "models": models}
     except (OSError, ValueError):
         pass  # Ollama not running or not responding
     return None
@@ -428,6 +429,14 @@ def _ollama_pick_models(models: list[str]) -> tuple[str, str | None]:
     Returns (embed_model, chat_model). chat_model is None if only
     embedding-specific models are available.
     """
+    if not models:
+        # A reachable but empty Ollama install is usable: the concrete
+        # providers call ollama_ensure_model(), which pulls defaults lazily.
+        return (
+            get_default_provider_model("embedding", "ollama") or "nomic-embed-text",
+            get_default_provider_model("summarization", "ollama") or "llama3.2",
+        )
+
     # Separate embedding-specific models from generative models
     embed_models = []
     generative_models = []

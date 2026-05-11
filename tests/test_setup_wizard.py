@@ -74,6 +74,27 @@ class TestDetectEmbeddingChoices:
         assert ollama_choices[0]["available"] is True
         assert ollama_choices[0]["default"] is True
 
+    def test_empty_ollama_server_uses_default_embedding(self, monkeypatch):
+        """A fresh Ollama install is available even before any models are pulled."""
+        monkeypatch.setattr(
+            "keep.setup_wizard._detect_ollama",
+            lambda: {"base_url": "http://localhost:11434", "models": []},
+        )
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("KEEP_OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+
+        choices = detect_embedding_choices()
+
+        ollama_choices = [c for c in choices if "Ollama" in c["name"]]
+        assert len(ollama_choices) == 1
+        assert ollama_choices[0]["available"] is True
+        assert ollama_choices[0]["value"] == ("ollama", {"model": "nomic-embed-text"})
+
     def test_no_ollama_api_key_default(self, monkeypatch):
         monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
         monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
@@ -144,6 +165,28 @@ class TestDetectSummarizationChoices:
         truncate = [c for c in choices if "truncate" in c["name"]]
         assert len(truncate) == 1
         assert truncate[0]["available"] is True
+
+    def test_empty_ollama_server_uses_default_summarization(self, monkeypatch):
+        """A fresh Ollama install can pull the default chat model on first use."""
+        monkeypatch.setattr(
+            "keep.setup_wizard._detect_ollama",
+            lambda: {"base_url": "http://localhost:11434", "models": []},
+        )
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("KEEP_OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+
+        choices = detect_summarization_choices()
+
+        ollama_choices = [c for c in choices if "Ollama" in c["name"]]
+        assert len(ollama_choices) == 1
+        assert ollama_choices[0]["available"] is True
+        assert ollama_choices[0]["value"] == ("ollama", {"model": "llama3.2"})
 
     def test_openrouter_summarization_shown_only_when_key_present(self, monkeypatch):
         monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
