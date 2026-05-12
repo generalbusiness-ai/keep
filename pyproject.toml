@@ -32,7 +32,8 @@ dependencies = [
     "openai>=1.0",
     "anthropic>=0.40.0",
     "google-genai>=1.0.0",
-    "mistralai>=1.0",
+    # Mistral providers (embeddings, chat, OCR) use the REST API directly via httpx
+    # — no mistralai SDK dependency.
     # Document extraction
     "pyjwt>=2.12.0",
     "pypdf>=6.10.0",  # GHSA-3crg-w4f6-42mx and CVE-2026-33699 fixes

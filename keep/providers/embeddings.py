@@ -539,35 +539,34 @@ class VoyageEmbedding:
 
 
 class MistralEmbedding:
-    """Embedding provider using Mistral AI's API.
+    """Embedding provider using Mistral AI's REST API.
+
+    Uses direct HTTP calls — no mistralai SDK needed.
 
     Requires: MISTRAL_API_KEY environment variable.
-    Requires: pip install mistralai
     """
 
     MODEL_DIMENSIONS = {
         "mistral-embed": 1024,
     }
 
+    API_URL = "https://api.mistral.ai/v1/embeddings"
+
     def __init__(
         self,
         model: str | None = None,
         api_key: str | None = None,
     ):
-        from mistralai import Mistral  # noqa: PLC0415
-
         model = require_provider_param(model, provider="MistralEmbedding")
         self.model_name = model
         self._dimension = self.MODEL_DIMENSIONS.get(model)
 
-        key = api_key or os.environ.get("MISTRAL_API_KEY")
-        if not key:
+        self._api_key = api_key or os.environ.get("MISTRAL_API_KEY")
+        if not self._api_key:
             raise ValueError(
                 "Mistral API key required. Set MISTRAL_API_KEY environment variable.\n"
                 "Get your API key at: https://console.mistral.ai/"
             )
-
-        self._client = Mistral(api_key=key)
 
     @property
     def dimension(self) -> int:
@@ -576,12 +575,33 @@ class MistralEmbedding:
             self._dimension = len(test_embedding)
         return self._dimension
 
+    def _post_embeddings(self, inputs: list[str], timeout: int) -> dict:
+        from .http import http_session  # noqa: PLC0415
+
+        try:
+            response = http_session().post(
+                self.API_URL,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": self.model_name, "input": inputs},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Cannot reach Mistral API: {exc}") from exc
+
+        if response.status_code in (401, 403):
+            raise RuntimeError(
+                f"Mistral API authentication failed ({response.status_code}). "
+                "Check your MISTRAL_API_KEY environment variable."
+            )
+        response.raise_for_status()
+        return response.json()
+
     def embed(self, text: str, *, task: EmbedTask = EmbedTask.DOCUMENT) -> list[float]:
-        response = self._client.embeddings.create(
-            model=self.model_name,
-            inputs=[text],
-        )
-        embedding = response.data[0].embedding
+        data = self._post_embeddings([text], timeout=60)
+        embedding = data["data"][0]["embedding"]
         if self._dimension is None:
             self._dimension = len(embedding)
         return embedding
@@ -589,12 +609,10 @@ class MistralEmbedding:
     def embed_batch(self, texts: list[str], *, task: EmbedTask = EmbedTask.DOCUMENT) -> list[list[float]]:
         if not texts:
             return []
-        response = self._client.embeddings.create(
-            model=self.model_name,
-            inputs=texts,
-        )
-        sorted_data = sorted(response.data, key=lambda x: x.index)
-        return [d.embedding for d in sorted_data]
+        data = self._post_embeddings(texts, timeout=120)
+        # Sort by index to ensure order matches input
+        sorted_data = sorted(data["data"], key=lambda d: d["index"])
+        return [d["embedding"] for d in sorted_data]
 
 
 # Register providers

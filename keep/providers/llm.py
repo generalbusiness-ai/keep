@@ -468,8 +468,43 @@ class OllamaContentExtractor:
         return text if len(text) > 10 else None
 
 
+def _mistral_post(path: str, api_key: str, payload: dict, timeout: int) -> dict:
+    """POST to a Mistral API endpoint and return the parsed JSON body.
+
+    Uses the shared httpx session — no mistralai SDK dependency. Auth
+    failures and network errors are reported with actionable messages
+    that name the env var to set.
+    """
+    import httpx  # noqa: PLC0415
+    from .http import http_session  # noqa: PLC0415
+
+    url = f"https://api.mistral.ai{path}"
+    try:
+        response = http_session().post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Cannot reach Mistral API: {exc}") from exc
+
+    if response.status_code in (401, 403):
+        raise RuntimeError(
+            f"Mistral API authentication failed ({response.status_code}). "
+            "Check your MISTRAL_API_KEY environment variable."
+        )
+    response.raise_for_status()
+    return response.json()
+
+
 class MistralSummarization:
     """Summarization provider using Mistral AI's chat API.
+
+    Uses direct HTTP calls — no mistralai SDK needed.
 
     Requires: MISTRAL_API_KEY environment variable.
 
@@ -482,20 +517,16 @@ class MistralSummarization:
         api_key: str | None = None,
         max_tokens: int = 200,
     ):
-        from mistralai import Mistral  # noqa: PLC0415
-
         model = require_provider_param(model, provider="MistralSummarization")
         self.model_name = model
         self.max_tokens = max_tokens
 
-        key = api_key or os.environ.get("MISTRAL_API_KEY")
-        if not key:
+        self._api_key = api_key or os.environ.get("MISTRAL_API_KEY")
+        if not self._api_key:
             raise ValueError(
                 "Mistral API key required. Set MISTRAL_API_KEY environment variable.\n"
                 "Get your API key at: https://console.mistral.ai/"
             )
-
-        self._client = Mistral(api_key=key)
 
     def summarize(
         self,
@@ -519,17 +550,23 @@ class MistralSummarization:
         *,
         max_tokens: int = 4096,
     ) -> str | None:
-        response = self._client.chat.complete(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=max_tokens,
+        data = _mistral_post(
+            "/v1/chat/completions",
+            self._api_key,
+            payload={
+                "model": self.model_name,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": max_tokens,
+            },
+            timeout=120,
         )
-        if response.choices:
-            return response.choices[0].message.content
-        return None
+        choices = data.get("choices") or []
+        if not choices:
+            return None
+        return choices[0].get("message", {}).get("content")
 
 
 class MistralContentExtractor:
@@ -537,6 +574,8 @@ class MistralContentExtractor:
 
     Supports images (PNG, JPEG, etc.) and PDFs.
     Uses mistral-ocr-latest model which returns structured markdown.
+
+    Uses direct HTTP calls — no mistralai SDK needed.
 
     Requires: MISTRAL_API_KEY environment variable.
     """
@@ -546,46 +585,45 @@ class MistralContentExtractor:
         model: str | None = None,
         api_key: str | None = None,
     ):
-        from mistralai import Mistral  # noqa: PLC0415
-
         model = require_provider_param(model, provider="MistralContentExtractor")
         self.model_name = model
 
-        key = api_key or os.environ.get("MISTRAL_API_KEY")
-        if not key:
+        self._api_key = api_key or os.environ.get("MISTRAL_API_KEY")
+        if not self._api_key:
             raise ValueError(
                 "Mistral API key required. Set MISTRAL_API_KEY environment variable.\n"
                 "Get your API key at: https://console.mistral.ai/"
             )
 
-        self._client = Mistral(api_key=key)
-
     def extract(self, path: str, content_type: str) -> str | None:
-        from mistralai.models import DocumentURLChunk, ImageURLChunk  # noqa: PLC0415
-
         if not (content_type.startswith("image/") or content_type == "application/pdf"):
             return None
 
         with open(path, "rb") as f:
-            data = base64.b64encode(f.read()).decode("utf-8")
+            data_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        data_url = f"data:{content_type};base64,{data}"
+        data_url = f"data:{content_type};base64,{data_b64}"
 
+        # OCR chunk shape: images use {"type": "image_url", "image_url": ...};
+        # PDFs and other documents use {"type": "document_url", "document_url": ...}.
         if content_type.startswith("image/"):
-            document = ImageURLChunk(image_url=data_url)
+            document = {"type": "image_url", "image_url": data_url}
         else:
-            document = DocumentURLChunk(document_url=data_url)
+            document = {"type": "document_url", "document_url": data_url}
 
-        response = self._client.ocr.process(
-            model=self.model_name,
-            document=document,
+        result = _mistral_post(
+            "/v1/ocr",
+            self._api_key,
+            payload={"model": self.model_name, "document": document},
+            timeout=300,
         )
 
         # Combine markdown from all pages
         pages = []
-        for page in response.pages:
-            if page.markdown and page.markdown.strip():
-                pages.append(page.markdown.strip())
+        for page in result.get("pages") or []:
+            md = (page.get("markdown") or "").strip()
+            if md:
+                pages.append(md)
 
         text = "\n\n".join(pages)
         return text if len(text) > 10 else None
