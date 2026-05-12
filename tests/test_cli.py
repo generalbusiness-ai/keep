@@ -963,6 +963,68 @@ class TestPutDirectory:
         files = _list_directory_files(tmp_path)
         assert [f.name for f in files] == ["visible.txt"]
 
+    def test_list_directory_files_prunes_nested_git_repo(self, tmp_path):
+        """Recursive walks should not cross into a nested Git repository."""
+        from keep.console_support import _list_directory_files
+        (tmp_path / "root.txt").write_text("root")
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        (nested / ".git").mkdir()
+        (nested / "inner.txt").write_text("inner")
+
+        files = _list_directory_files(tmp_path, recurse=True)
+
+        assert [f.relative_to(tmp_path) for f in files] == [Path("root.txt")]
+
+    def test_list_directory_files_prunes_nested_git_worktree(self, tmp_path):
+        """Recursive walks should not cross into a nested linked worktree."""
+        from keep.console_support import _list_directory_files
+        (tmp_path / "root.txt").write_text("root")
+        nested = tmp_path / "worktree"
+        nested.mkdir()
+        (nested / ".git").write_text("gitdir: ../.git/worktrees/worktree\n")
+        (nested / "inner.txt").write_text("inner")
+
+        files = _list_directory_files(tmp_path, recurse=True)
+
+        assert [f.relative_to(tmp_path) for f in files] == [Path("root.txt")]
+
+    def test_git_visible_files_prunes_nested_git_worktree(self, tmp_path, monkeypatch):
+        """Git-aware walks should also enforce nested worktree boundaries."""
+        from keep import utils
+        from keep.console_support import _list_directory_files
+        (tmp_path / "root.txt").write_text("root")
+        nested = tmp_path / "worktree"
+        nested.mkdir()
+        (nested / ".git").write_text("gitdir: ../.git/worktrees/worktree\n")
+        (nested / "inner.txt").write_text("inner")
+
+        def fake_run(*args, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"root.txt\0worktree/inner.txt\0",
+            )
+
+        monkeypatch.setattr(
+            utils,
+            "subprocess",
+            SimpleNamespace(run=fake_run, TimeoutExpired=subprocess.TimeoutExpired),
+        )
+
+        files = _list_directory_files(tmp_path, recurse=True)
+
+        assert [f.relative_to(tmp_path) for f in files] == [Path("root.txt")]
+
+    def test_list_directory_files_allows_root_git_worktree(self, tmp_path):
+        """The walk root may itself be a linked worktree."""
+        from keep.console_support import _list_directory_files
+        (tmp_path / ".git").write_text("gitdir: ../.git/worktrees/current\n")
+        (tmp_path / "root.txt").write_text("root")
+
+        files = _list_directory_files(tmp_path, recurse=True)
+
+        assert [f.relative_to(tmp_path) for f in files] == [Path("root.txt")]
+
     def test_list_directory_files_empty(self, tmp_path):
         """_list_directory_files returns empty list for empty directory."""
         from keep.console_support import _list_directory_files

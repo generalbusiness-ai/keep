@@ -41,7 +41,7 @@ keep put ./docs/ -r                        # All files in docs/ (recursive)
 keep put ./src/ -r -x "*.pyc" -x "__pycache__"  # Recursive with excludes
 ```
 
-Excludes use glob patterns matched against the relative path from the directory root. Hidden files and symlinks are always skipped.
+Excludes use glob patterns matched against the relative path from the directory root. Hidden files, symlinks, and nested Git repositories or worktrees are always skipped. If the directory root is itself a linked worktree, its files are indexed normally.
 
 ## Watching for changes
 

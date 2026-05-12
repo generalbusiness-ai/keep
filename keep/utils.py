@@ -487,6 +487,23 @@ def _text_content_id(content: str) -> str:
 # Directory walking (shared by cli.py and watches.py)
 # ---------------------------------------------------------------------------
 
+def _has_nested_git_boundary(entry: Path, directory: Path) -> bool:
+    """Return true when a file is inside a nested Git checkout or worktree.
+
+    Linked worktrees use a `.git` file rather than a `.git/` directory, so
+    hidden-name filtering alone is not enough to keep a recursive import from
+    crossing into a separate repository.  The root directory is not considered
+    nested; this lets `keep put -r <worktree>` index that worktree normally.
+    """
+    root = directory.resolve()
+    current = entry.parent.resolve()
+    while current != root and current != current.parent:
+        if (current / ".git").exists():
+            return True
+        current = current.parent
+    return False
+
+
 def _git_visible_files(
     directory: Path, recurse: bool, exclude: list[str] | None = None,
 ) -> list[Path] | None:
@@ -526,6 +543,8 @@ def _git_visible_files(
             continue
         if entry.is_symlink() or not entry.is_file():
             continue
+        if _has_nested_git_boundary(entry, directory):
+            continue
         # Apply user-specified exclude patterns against relative path
         if exclude and any(fnmatch.fnmatch(relpath, pat) for pat in exclude):
             continue
@@ -552,8 +571,13 @@ def _list_directory_files(
     files = []
     if recurse:
         for root, dirs, filenames in os.walk(directory, followlinks=False):
-            # Skip hidden directories (modifying dirs in-place prunes them)
-            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            # Skip hidden directories and nested Git checkouts/worktrees.
+            # Modifying dirs in-place prunes the walk before child files are
+            # considered, which keeps recursive imports scoped to one tree.
+            dirs[:] = sorted(
+                d for d in dirs
+                if not d.startswith(".") and not (Path(root) / d / ".git").exists()
+            )
             # Prune excluded directories early
             if exclude:
                 rel_root = Path(root).relative_to(directory)
