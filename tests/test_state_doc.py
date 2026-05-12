@@ -1,5 +1,7 @@
 """Tests for state-doc loader, compiler, and evaluator."""
 
+import logging
+
 import pytest
 
 from keep.state_doc import (
@@ -482,6 +484,40 @@ rules:
         doc = parse_state_doc("test", body)
         # Missing variable should not crash, just return false
         assert evaluate_state_doc(doc, {}).terminal == "stopped"
+
+    def test_missing_tag_key_treated_as_quiet_non_match(self, caplog):
+        """Absent optional tags should filter out rules without warning."""
+        body = """
+match: sequence
+rules:
+  - when: "'conversation' in item.tags.type"
+    return: done
+  - return: stopped
+"""
+        doc = parse_state_doc("test", body)
+
+        with caplog.at_level(logging.WARNING, logger="keep.state_doc"):
+            result = evaluate_state_doc(doc, {"item": {"tags": {}}})
+
+        assert result.terminal == "stopped"
+        assert "Predicate eval error" not in caplog.text
+
+    def test_invalid_predicate_operation_still_warns(self, caplog):
+        """Unsupported CEL operations should remain visible in logs."""
+        body = """
+match: sequence
+rules:
+  - when: "item.content_length > 100"
+    return: done
+  - return: stopped
+"""
+        doc = parse_state_doc("test", body)
+
+        with caplog.at_level(logging.WARNING, logger="keep.state_doc"):
+            result = evaluate_state_doc(doc, {"item": {"content_length": ""}})
+
+        assert result.terminal == "stopped"
+        assert "Predicate eval error" in caplog.text
 
 
 # ---------------------------------------------------------------------------

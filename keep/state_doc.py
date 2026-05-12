@@ -102,6 +102,13 @@ def _eval_predicate(program: Any, context: dict[str, Any], source: str = "") -> 
     try:
         result = program.execute(context)
     except Exception as exc:
+        # CEL raises for absent map keys, but `when:` predicates are filters:
+        # a note missing the referenced tag simply does not match the rule.
+        # NOTE: substring match tracks the cel library's error wording —
+        # revisit if the upstream message format changes.
+        if "No such key:" in str(exc):
+            logger.debug("Predicate missing key in %r: %s", source or "<unknown>", exc)
+            return False
         logger.warning("Predicate eval error in %r: %s", source or "<unknown>", exc)
         return False
     if isinstance(result, bool):
