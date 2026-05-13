@@ -2,12 +2,14 @@ from __future__ import annotations
 
 """Item-scoped decomposition action for generating structured parts."""
 
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from ..processors import process_analyze
 from ..providers.base import AnalysisChunk
 from ..tracing import get_tracer
-from ..types import SYSTEM_TAG_PREFIX
+from ..types import SYSTEM_TAG_PREFIX, parse_utc_timestamp, utc_now
 from . import action
 from ._item_scope import check_content_hash, resolve_item_text
 from ._tagging import classify_parts_with_specs, _filter_specs_by_when
@@ -15,6 +17,16 @@ from ._item_scope import resolve_item
 from ._tagging import load_tag_specs
 
 tracer = get_tracer("flow")
+logger = logging.getLogger(__name__)
+
+# Minimum interval between successful analyze runs on the same item, in
+# seconds. Rapid edits within this window coalesce — the analyze action
+# skips with reason "throttled" and lets the next post-throttle edit (or
+# an explicit `force=True`) drive the next decomposition. Tunable via the
+# `KEEP_ANALYZE_MIN_INTERVAL_S` env var. Mostly aimed at watched files
+# (test files, design docs) where one save can fire several rapid
+# re-imports without anything actually changing meaningfully.
+DEFAULT_MIN_ANALYZE_INTERVAL_S = 300.0  # 5 minutes
 
 
 def _normalize_part(raw: Any) -> dict[str, Any]:
@@ -26,6 +38,58 @@ def _normalize_part(raw: Any) -> dict[str, Any]:
         "summary": str(raw.get("summary") or ""),
         "tags": dict(tags) if isinstance(tags, dict) else {},
     }
+
+
+def _min_analyze_interval_s() -> float:
+    """Read the throttle window from env or fall back to the default.
+
+    Set ``KEEP_ANALYZE_MIN_INTERVAL_S=0`` to disable throttling entirely.
+    """
+    import os
+    raw = os.environ.get("KEEP_ANALYZE_MIN_INTERVAL_S")
+    if raw is None:
+        return DEFAULT_MIN_ANALYZE_INTERVAL_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_MIN_ANALYZE_INTERVAL_S
+
+
+def _params_force(params: dict[str, Any]) -> bool:
+    """`force=True` (or `"true"`) bypasses every analyze guard."""
+    raw = params.get("force")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("true", "1", "yes")
+    return False
+
+
+def _throttle_skip_reason(item_tags: dict[str, Any]) -> str | None:
+    """If `_analyzed_at` is within the throttle window, return a skip reason.
+
+    Returns ``None`` when there's no recorded prior analyze, the timestamp is
+    unparseable, or enough time has passed for the next decomposition to run.
+    """
+    interval = _min_analyze_interval_s()
+    if interval <= 0:
+        return None
+    last_at = item_tags.get("_analyzed_at")
+    if not last_at:
+        return None
+    try:
+        last_dt = parse_utc_timestamp(str(last_at))
+    except (ValueError, TypeError):
+        return None
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+    if elapsed < 0:
+        # Clock skew or future timestamp — don't pretend to know what to do.
+        return None
+    if elapsed >= interval:
+        return None
+    return f"throttled (last analyzed {int(elapsed)}s ago, min {int(interval)}s)"
 
 
 @action(id="analyze", priority=7, async_action=True)
@@ -106,6 +170,16 @@ class Analyze:
 
         if check_content_hash(params, context, item_id, "_analyzed_hash"):
             return {"skipped": True, "reason": "content unchanged"}
+
+        # Throttle rapid re-analyze on the same item. The full analyze
+        # pipeline can spend tens of seconds of LLM time per call; watched
+        # files that get edited several times a minute would otherwise
+        # queue back-to-back decompositions. The next post-throttle edit
+        # (or `force=True`) gets through and catches up to current content.
+        if not _params_force(params):
+            throttled = _throttle_skip_reason(item_tags)
+            if throttled is not None:
+                return {"skipped": True, "reason": throttled}
         with tracer.start_as_current_span(
             "analyze.prepare",
             attributes={"item_id": item_id},
@@ -255,10 +329,13 @@ class Analyze:
                     }
                 )
 
-            # Record _analyzed_hash so we don't re-analyze unchanged content
+            # Record _analyzed_hash so we don't re-analyze unchanged content,
+            # and _analyzed_at so the throttle in `run()` can see how
+            # recently this item was decomposed.
             content_hash = getattr(doc, "content_hash", None) if doc else None
             if content_hash:
                 existing_tags["_analyzed_hash"] = content_hash
+                existing_tags["_analyzed_at"] = utc_now()
                 list_versions = getattr(context, "list_versions", None)
                 if callable(list_versions):
                     versions = list_versions(item_id, limit=1)
