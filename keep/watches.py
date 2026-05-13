@@ -350,6 +350,120 @@ def has_active_watches(keeper: Keeper) -> bool:
     return any(not e.stale for e in entries)
 
 
+def _format_interval(iso: str) -> str:
+    """Render an ISO 8601 duration like 'PT5M' as 'every 5m'."""
+    try:
+        td = parse_duration(iso)
+    except ValueError:
+        return iso
+    secs = int(td.total_seconds())
+    if secs % 86400 == 0:
+        return f"every {secs // 86400}d"
+    if secs % 3600 == 0:
+        return f"every {secs // 3600}h"
+    if secs % 60 == 0:
+        return f"every {secs // 60}m"
+    return f"every {secs}s"
+
+
+def format_watches(entries: list[WatchEntry], now: datetime | None = None) -> list[str]:
+    """Render watch entries for `keep pending --list`.
+
+    Each line is `  <kind>  <source>  <interval>  last: <ago>  next: <until>`.
+    """
+    from .timer_state import _format_ago, _format_until
+
+    now = now or datetime.now(timezone.utc)
+    lines: list[str] = []
+    for entry in entries:
+        if entry.last_checked:
+            try:
+                last_dt = datetime.fromisoformat(entry.last_checked)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                last_ago = _format_ago((now - last_dt).total_seconds())
+            except (ValueError, TypeError):
+                last_ago = "never"
+                last_dt = None
+        else:
+            last_ago = "never"
+            last_dt = None
+
+        try:
+            td = parse_duration(entry.interval)
+        except ValueError:
+            td = None
+
+        if last_dt and td:
+            next_str = _format_until((last_dt + td - now).total_seconds())
+        else:
+            next_str = "due now"
+
+        lines.append(
+            f"  {entry.kind:10s} {entry.source}  "
+            f"{_format_interval(entry.interval):10s} last: {last_ago:>8s}  next: {next_str}"
+        )
+    return lines
+
+
+def load_watches_lightweight(store_path: Path) -> list[WatchEntry]:
+    """Load watches by reading documents.db directly — no Keeper required.
+
+    Used by `keep pending --list` (which avoids spinning up a Keeper to keep
+    the lookup fast and lock-free). Returns an empty list on any error
+    (missing db, schema mismatch, parse failure) — the caller can still
+    show the rest of the listing.
+    """
+    import sqlite3
+
+    from .const import DOCUMENTS_DB
+
+    db_path = store_path / DOCUMENTS_DB
+    if not db_path.exists():
+        return []
+
+    entries: list[WatchEntry] = []
+    # Read-only URI mode avoids fighting the running daemon for write locks.
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return []
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT id, summary FROM documents "
+                "WHERE collection = ? AND (id = ? OR id LIKE ?)",
+                (_DOC_COLLECTION, _WATCHES_ID, _WATCHES_PREFIX + "%"),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+    finally:
+        conn.close()
+
+    for doc_id, summary in rows:
+        if not summary:
+            continue
+        try:
+            interval = _interval_for_doc_id(doc_id)
+        except ValueError:
+            continue
+        try:
+            items = yaml.safe_load(summary)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            entry = _dict_to_entry(item)
+            entry.interval = interval
+            entries.append(entry)
+
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Change detection
 # ---------------------------------------------------------------------------

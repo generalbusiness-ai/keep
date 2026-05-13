@@ -2057,6 +2057,25 @@ def print_pending_list_lightweight(store_path: "Path") -> None:
                 error = item.get("last_error", "unknown")
                 typer.echo(f"  {item['task_type']:15s} {item['id']}: {error}")
 
+    # Active watches (file/directory/URL polling registered by the user)
+    try:
+        from .watches import format_watches, load_watches_lightweight
+        watches = load_watches_lightweight(store_path)
+    except Exception:
+        watches = []
+        format_watches = None
+    if watches:
+        typer.echo("\nWatches:")
+        active = [w for w in watches if not w.stale]
+        stale = [w for w in watches if w.stale]
+        if format_watches:
+            for line in format_watches(active):
+                typer.echo(line)
+            if stale:
+                typer.echo(f"  ({len(stale)} stale — source unreachable)")
+                for line in format_watches(stale):
+                    typer.echo(line)
+
     # Timer events
     try:
         from .timer_state import KNOWN_TIMERS, format_timer_events

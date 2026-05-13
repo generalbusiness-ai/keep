@@ -12,6 +12,7 @@ from keep.watches import (
     WatchEntry,
     parse_duration,
     load_watches,
+    load_watches_lightweight,
     save_watches,
     add_watch,
     remove_watch,
@@ -20,6 +21,7 @@ from keep.watches import (
     check_file,
     check_directory,
     check_url,
+    format_watches,
     poll_watches,
     next_check_delay,
     _compute_walk_hash,
@@ -196,9 +198,81 @@ class TestWatchCRUD:
         assert intervals["https://example.com"] == "PT5M"
 
 
-# ---------------------------------------------------------------------------
-# Change detection: files
-# ---------------------------------------------------------------------------
+class TestLightweightReader:
+    """Watches read directly from documents.db.
+
+    `load_watches_lightweight` reads watches directly from documents.db
+    so `keep pending --list` doesn't need to spin up a full Keeper.
+    These tests use a real on-disk DocumentStore — `mock_providers` would
+    bypass the sqlite file the lightweight reader needs to query.
+    """
+
+    def test_no_db_returns_empty(self, tmp_path):
+        # Store directory exists but documents.db has never been created.
+        assert load_watches_lightweight(tmp_path) == []
+
+    def test_reads_persisted_watches(self, tmp_path):
+        from keep.const import DOCUMENTS_DB
+        from keep.document_store import DocumentStore
+
+        ds = DocumentStore(tmp_path / DOCUMENTS_DB)
+        try:
+            # save_watches only needs `keeper._document_store`; the lightweight
+            # reader hits the same sqlite file on disk.
+            class _DSHolder:
+                _document_store = ds
+            save_watches(
+                _DSHolder(),
+                [
+                    WatchEntry(source="file:///tmp/a.txt", kind="file"),
+                    WatchEntry(source="https://example.com", kind="url", interval="PT5M"),
+                ],
+            )
+        finally:
+            ds.close()
+
+        entries = load_watches_lightweight(tmp_path)
+        by_source = {e.source: e for e in entries}
+        assert set(by_source.keys()) == {"file:///tmp/a.txt", "https://example.com"}
+        assert by_source["https://example.com"].interval == "PT5M"
+        assert by_source["file:///tmp/a.txt"].interval == "PT30S"
+
+
+class TestFormatWatches:
+    """Display lines for the `Watches:` section.
+
+    `format_watches` renders one human-readable line per entry, used in
+    the `Watches:` section of `keep pending --list`.
+    """
+
+    def test_renders_kind_source_and_interval(self):
+        entry = WatchEntry(
+            source="/Users/me/play/keep",
+            kind="directory",
+            interval="PT5M",
+        )
+        lines = format_watches([entry])
+        assert len(lines) == 1
+        assert "directory" in lines[0]
+        assert "/Users/me/play/keep" in lines[0]
+        assert "every 5m" in lines[0]
+        # No last_checked → show "never" / "due now"
+        assert "never" in lines[0]
+        assert "due now" in lines[0]
+
+    def test_renders_last_and_next(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        # Last check 1 minute ago, every 5 minutes → next in 4m.
+        entry = WatchEntry(
+            source="file:///tmp/x.txt",
+            kind="file",
+            interval="PT5M",
+            last_checked="2026-01-01T11:59:00+00:00",
+        )
+        line = format_watches([entry], now=now)[0]
+        assert "last:" in line and "1m ago" in line
+        assert "next:" in line and "in 4m" in line
 
 class TestCheckFile:
     """Tests for file change detection."""
