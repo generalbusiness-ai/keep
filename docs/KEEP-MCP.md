@@ -47,6 +47,13 @@ kiro-cli mcp add --name keep --scope global -- keep --store "$KEEP_STORE_PATH" m
 
 ### Codex
 
+`keep config --setup` auto-installs `[mcp_servers.keep]` into
+`~/.codex/config.toml` with the resolved store path baked into `--store`.
+Codex.app launched from Finder does not inherit your shell environment, so
+the baked-in path is more reliable than `KEEP_STORE_PATH`.
+
+To add the entry manually instead:
+
 ```bash
 codex mcp add keep -- keep --store "$KEEP_STORE_PATH" mcp
 ```

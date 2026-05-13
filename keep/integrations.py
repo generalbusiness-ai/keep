@@ -347,8 +347,50 @@ def install_claude_code(config_dir: Path) -> list[str]:
     return actions
 
 
+def _install_codex_mcp_server(config_toml: Path) -> bool:
+    """Add or update `[mcp_servers.keep]` in Codex's config.toml.
+
+    Codex.app launched from Finder does NOT inherit the user's shell env,
+    so `KEEP_STORE_PATH` is unavailable when codex spawns `keep mcp`.
+    Bake the resolved store into `--store` so the right store is used
+    regardless of how codex is launched. Mirrors install_github_copilot.
+
+    Returns True if the file was written (new or updated).
+    """
+    import tomli_w
+
+    from .daemon_client import resolve_store_path
+
+    data: dict[str, Any] = {}
+    if config_toml.exists():
+        try:
+            import tomllib
+
+            with open(config_toml, "rb") as f:
+                data = tomllib.load(f)
+        except (tomllib.TOMLDecodeError, OSError) as e:
+            logger.warning("Cannot parse %s, skipping MCP install: %s", config_toml, e)
+            return False
+
+    servers = data.setdefault("mcp_servers", {})
+    keep_entry = {
+        "command": "keep",
+        # Bake the resolved store in — codex strips shell env on launch
+        # from Finder, so an env-only override is not reliable.
+        "args": ["--store", str(resolve_store_path()), "mcp"],
+    }
+    if servers.get("keep") == keep_entry:
+        return False  # Already up to date
+
+    servers["keep"] = keep_entry
+    config_toml.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_toml, "wb") as f:
+        tomli_w.dump(data, f)
+    return True
+
+
 def install_codex(config_dir: Path) -> list[str]:
-    """Install protocol block for OpenAI Codex.
+    """Install protocol block and MCP server config for OpenAI Codex.
 
     Returns list of actions taken.
     """
@@ -357,6 +399,10 @@ def install_codex(config_dir: Path) -> list[str]:
     agents_md = config_dir / "AGENTS.md"
     if _install_protocol_block(agents_md):
         actions.append("protocol block")
+
+    config_toml = config_dir / "config.toml"
+    if _install_codex_mcp_server(config_toml):
+        actions.append("MCP server")
 
     return actions
 

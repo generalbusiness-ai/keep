@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,15 +13,61 @@ from keep.integrations import (
 )
 
 
-def test_install_codex_writes_global_codex_agents_file(tmp_path):
+def test_install_codex_writes_global_codex_agents_file(tmp_path, monkeypatch):
     codex_dir = tmp_path / ".codex"
+    monkeypatch.setenv("KEEP_STORE_PATH", str(tmp_path / "store"))
 
     actions = install_codex(codex_dir)
 
-    assert actions == ["protocol block"]
+    assert actions == ["protocol block", "MCP server"]
     agents_md = codex_dir / "AGENTS.md"
     assert agents_md.exists()
     assert PROTOCOL_BLOCK_MARKER in agents_md.read_text(encoding="utf-8")
+
+
+def test_install_codex_bakes_in_resolved_store_path(tmp_path, monkeypatch):
+    codex_dir = tmp_path / ".codex"
+    expected_store = str((tmp_path / "hermes-store").resolve())
+    monkeypatch.setenv("KEEP_STORE_PATH", str(tmp_path / "hermes-store"))
+
+    install_codex(codex_dir)
+
+    config_toml = codex_dir / "config.toml"
+    assert config_toml.exists()
+    data = tomllib.loads(config_toml.read_text(encoding="utf-8"))
+    assert data["mcp_servers"]["keep"] == {
+        "command": "keep",
+        "args": ["--store", expected_store, "mcp"],
+    }
+
+
+def test_install_codex_is_idempotent_when_entry_is_current(tmp_path, monkeypatch):
+    codex_dir = tmp_path / ".codex"
+    monkeypatch.setenv("KEEP_STORE_PATH", str(tmp_path / "store"))
+
+    assert install_codex(codex_dir) == ["protocol block", "MCP server"]
+    # Second run: nothing changed, so no actions reported.
+    assert install_codex(codex_dir) == []
+
+
+def test_install_codex_preserves_other_config_sections(tmp_path, monkeypatch):
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    config_toml = codex_dir / "config.toml"
+    # Simulate pre-existing user config with unrelated sections.
+    config_toml.write_text(
+        '[projects."/some/path"]\ntrust_level = "trusted"\n\n'
+        "[mcp_servers.other]\ncommand = \"other-tool\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KEEP_STORE_PATH", str(tmp_path / "store"))
+
+    install_codex(codex_dir)
+
+    data = tomllib.loads(config_toml.read_text(encoding="utf-8"))
+    assert data["projects"]["/some/path"]["trust_level"] == "trusted"
+    assert data["mcp_servers"]["other"]["command"] == "other-tool"
+    assert data["mcp_servers"]["keep"]["command"] == "keep"
 
 
 def test_check_and_install_does_not_modify_cwd_agents_md(tmp_path, monkeypatch):
