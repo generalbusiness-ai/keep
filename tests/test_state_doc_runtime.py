@@ -56,6 +56,44 @@ def _store_loader(kp: Keeper):
 # Basic terminal flow
 # ---------------------------------------------------------------------------
 
+def test_run_flow_top_level_logs_at_info(caplog):
+    """Top-level run_flow logs state transitions at INFO."""
+    import logging
+    caplog.set_level(logging.DEBUG, logger="keep.state_doc_runtime")
+    loader = _make_loader({"simple": "match: sequence\nrules:\n  - return: done"})
+    run_flow("simple", {}, load_state_doc=loader, run_action=_make_runner())
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    assert any("flow: start simple" in m for m in info_msgs)
+    assert any("simple -> done" in m for m in info_msgs)
+
+
+def test_run_flow_nested_subflow_logs_at_debug(caplog):
+    """Subflows invoked from within an active counter_scope log at DEBUG, not INFO.
+
+    The parent flow's `compute:` rollup captures the aggregate, so trivial
+    subflow transitions don't need to flood the ops log.
+    """
+    import logging
+
+    from keep.compute_context import counter_scope
+
+    caplog.set_level(logging.DEBUG, logger="keep.state_doc_runtime")
+    loader = _make_loader({"simple": "match: sequence\nrules:\n  - return: done"})
+
+    # Open a parent scope so run_flow sees it as nested (this is what
+    # state_doc_runtime.run_flow itself does, or what work_processor sets up).
+    with counter_scope(label="parent"):
+        run_flow("simple", {}, load_state_doc=loader, run_action=_make_runner())
+
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelname == "INFO" and "flow:" in r.getMessage()]
+    debug_msgs = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG" and "flow:" in r.getMessage()]
+    # No INFO-level flow lines from the nested subflow.
+    assert not info_msgs, f"unexpected INFO flow lines: {info_msgs}"
+    # But DEBUG should still have them.
+    assert any("flow: start simple" in m for m in debug_msgs)
+    assert any("simple -> done" in m for m in debug_msgs)
+
+
 def test_run_flow_emits_runtime_trace_spans():
     """run_flow emits trace spans for state-doc load and evaluation."""
     loader = _make_loader({

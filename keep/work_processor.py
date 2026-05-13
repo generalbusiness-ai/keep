@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from .compute_context import attribution, counter_scope
 from .protocol import WorkQueueProtocol
 from .tracing import get_tracer
 
@@ -80,7 +81,11 @@ def process_work_batch(
                     "item_id": str(target),
                     "queue.priority": item.priority,
                 },
-            ) as span:
+            ) as span, attribution(
+                work_id=item.work_id,
+                item_id=str(target),
+                kind=item.kind,
+            ), counter_scope(label=f"work:{item.kind}") as counters:
                 if wait_ms is not None:
                     span.set_attribute("queue.wait_ms", round(wait_ms, 3))
                 outcome = _execute_work_item(
@@ -89,6 +94,15 @@ def process_work_batch(
                     item.input,
                     shutdown_check=shutdown_check,
                 )
+                # Merge compute counters into the outcome so they're recorded
+                # in the work-queue result_json for later attribution queries.
+                # Done inside the scope so an exception during _execute_work_item
+                # leaves `outcome` unbound and falls through to the except below.
+                if outcome is None:
+                    outcome = {}
+                if not counters.is_empty():
+                    outcome = dict(outcome)
+                    outcome["compute"] = counters.to_dict()
             status = outcome.get("status", "applied")
             details = outcome.get("details")
             if item.kind == "flow" and status == "stopped" and outcome.get("cursor"):

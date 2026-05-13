@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ..compute_context import apply_context_attrs, current_counters
 from ..const import SQLITE_BUSY_TIMEOUT_MS
 from ..provider_identity import provider_model_name
 from ..tracing import get_tracer
@@ -23,7 +24,7 @@ from .base import EmbedTask, EmbeddingProvider
 
 logger = logging.getLogger(__name__)
 
-SUMMARY_INTERVAL_S = 60.0
+SUMMARY_INTERVAL_S = 600.0  # 10 minutes — per-flow `compute:` lines now carry near-term detail.
 SUMMARY_TEXT_THRESHOLD = 100
 WORKING_SET_SHORT_WINDOW_S = 5 * 60.0
 WORKING_SET_LONG_WINDOW_S = 30 * 60.0
@@ -490,12 +491,16 @@ class CachingEmbeddingProvider:
             "embed.request",
             attributes=self._span_attrs(task=task, batch_size=1),
         ) as span:
+            apply_context_attrs(span)
+            counters = current_counters()
             # Check cache (fail-safe)
             try:
                 cached = self._cache.get(cache_model, text)
                 if cached is not None:
                     with self._stats_lock:
                         self._hits += 1
+                    if counters is not None:
+                        counters.add_embed(hit=True, ms=0.0)
                     self._set_request_summary_attrs(span, hit_count=1, miss_count=0)
                     self.log_summary("interval")
                     return cached
@@ -508,8 +513,13 @@ class CachingEmbeddingProvider:
             with _tracer.start_as_current_span(
                 "embed.compute",
                 attributes=self._span_attrs(task=task, batch_size=1),
-            ):
+            ) as compute_span:
+                apply_context_attrs(compute_span)
+                _t0 = time.monotonic()
                 embedding = self._provider.embed(text, task=task)
+                _compute_ms = (time.monotonic() - _t0) * 1000.0
+            if counters is not None:
+                counters.add_embed(hit=False, ms=_compute_ms)
 
             # Store in cache (fail-safe)
             try:
@@ -541,6 +551,8 @@ class CachingEmbeddingProvider:
             "embed.batch",
             attributes=self._span_attrs(task=task, batch_size=len(texts)),
         ) as span:
+            apply_context_attrs(span)
+            counters = current_counters()
             # Check cache for each text (fail-safe)
             for i, text in enumerate(texts):
                 try:
@@ -548,6 +560,8 @@ class CachingEmbeddingProvider:
                     if cached is not None:
                         with self._stats_lock:
                             self._hits += 1
+                        if counters is not None:
+                            counters.add_embed(hit=True, ms=0.0)
                         results[i] = cached
                         continue
                 except Exception as e:
@@ -565,8 +579,17 @@ class CachingEmbeddingProvider:
                         **self._span_attrs(task=task, batch_size=len(texts)),
                         "count": len(texts_to_embed),
                     },
-                ):
+                ) as compute_span:
+                    apply_context_attrs(compute_span)
+                    _t0 = time.monotonic()
                     embeddings = self._provider.embed_batch(list(texts_to_embed), task=task)
+                    _compute_ms = (time.monotonic() - _t0) * 1000.0
+                if counters is not None:
+                    # Distribute the batch wall time across the misses so per-flow
+                    # totals stay comparable to single-call timing.
+                    per_call = _compute_ms / max(1, len(to_embed))
+                    for _ in to_embed:
+                        counters.add_embed(hit=False, ms=per_call)
 
                 for idx, text, embedding in zip(indices, texts_to_embed, embeddings):
                     results[idx] = embedding

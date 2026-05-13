@@ -172,12 +172,30 @@ def run_flow(
         the cursor field contains a resumable token.
     """
     import time as _time
+    from .compute_context import (
+        apply_context_attrs as _apply_ctx_attrs,
+        attribution as _attribution,
+        counter_scope as _counter_scope,
+        current_counters as _current_counters,
+    )
     from .tracing import get_tracer as _get_tracer
     _flow_t0 = _time.monotonic()
     _flow_tracer = _get_tracer("flow")
 
     def _elapsed_ms() -> float:
         return (_time.monotonic() - _flow_t0) * 1000.0
+
+    # Nested flows (subflows invoked from an action) inherit an open
+    # counter_scope from the parent. Demote their per-state transition logs
+    # to DEBUG so a single user query doesn't flood the ops log with dozens
+    # of trivial `compat-get-item -> done (0.3ms)` lines — the parent flow's
+    # `compute:` rollup already captures the aggregate.
+    _is_nested = _current_counters() is not None
+    _flow_log = logger.debug if _is_nested else logger.info
+
+    # Pull an item_id out of params if present, for attribution. Falls back
+    # to the empty string when callers don't supply one.
+    _attr_item_id = params.get("item_id") or params.get("id")
 
     with _flow_tracer.start_as_current_span(
         "flow.run",
@@ -187,7 +205,12 @@ def run_flow(
             "foreground": foreground,
             "resumed": cursor is not None,
         },
-    ) as _flow_span:
+    ) as _flow_span, _attribution(
+        flow_id=initial_state,
+        item_id=str(_attr_item_id) if _attr_item_id else None,
+    ), _counter_scope(label=f"flow:{initial_state}"):
+        _apply_ctx_attrs(_flow_span)
+
         def _set_flow_attr(key: str, value: Any) -> None:
             setter = getattr(_flow_span, "set_attribute", None)
             if callable(setter):
@@ -199,13 +222,13 @@ def run_flow(
             prior_ticks = cursor.ticks
             accumulated_bindings: dict[str, dict[str, Any]] = dict(cursor.bindings)
             tried_queries: list[str] = list(cursor.tried_queries)
-            logger.info("flow: resume %s (prior ticks: %d)", current_state, prior_ticks)
+            _flow_log("flow: resume %s (prior ticks: %d)", current_state, prior_ticks)
         else:
             current_state = initial_state
             prior_ticks = 0
             accumulated_bindings = {}
             tried_queries = []
-            logger.info("flow: start %s", initial_state)
+            _flow_log("flow: start %s", initial_state)
 
         current_params = dict(params)
         ticks = 0
@@ -220,7 +243,7 @@ def run_flow(
             cursor_token = encode_cursor(
                 current_state, total_ticks, accumulated_bindings, tried_queries,
             )
-            logger.info(
+            _flow_log(
                 "flow: %s -> stopped (%s, %d ticks, %.1fms)",
                 current_state,
                 reason,
@@ -302,7 +325,7 @@ def run_flow(
             ):
                 doc = load_state_doc(current_state)
             if doc is None:
-                logger.info(
+                _flow_log(
                     "flow: %s -> error (state doc not found, %.1fms)",
                     current_state,
                     _elapsed_ms(),
@@ -339,7 +362,7 @@ def run_flow(
                 cursor_token = encode_cursor(
                     current_state, total_ticks, accumulated_bindings, tried_queries,
                 )
-                logger.info(
+                _flow_log(
                     "flow: %s -> async (%s, %d ticks, %.1fms)",
                     current_state, aa.action_name, total_ticks, _elapsed_ms(),
                 )
@@ -375,7 +398,7 @@ def run_flow(
 
             # Terminal
             if result.terminal is not None:
-                logger.info(
+                _flow_log(
                     "flow: %s -> %s (%d ticks, %.1fms)",
                     current_state,
                     result.terminal,
@@ -397,7 +420,7 @@ def run_flow(
             if result.transition is not None:
                 next_state, transition_params = _parse_transition(result.transition)
                 if next_state is None:
-                    logger.info(
+                    _flow_log(
                         "flow: %s -> error (invalid transition, %.1fms)",
                         current_state,
                         _elapsed_ms(),
@@ -410,7 +433,7 @@ def run_flow(
                         ticks=_total_ticks(),
                         history=history,
                     )
-                logger.info("flow: %s -> %s (%.1fms)", current_state, next_state, _elapsed_ms())
+                _flow_log("flow: %s -> %s (%.1fms)", current_state, next_state, _elapsed_ms())
                 # Transition params merge into (override) current params
                 current_params = dict(current_params)
                 current_params.update(transition_params)
@@ -418,7 +441,7 @@ def run_flow(
                 continue
 
             # No terminal, no transition — shouldn't happen (evaluator defaults to done)
-            logger.info(
+            _flow_log(
                 "flow: %s -> done (implicit, %d ticks, %.1fms)",
                 current_state,
                 ticks,
@@ -437,7 +460,7 @@ def run_flow(
         # Budget exhausted — return cursor for resumption
         total_ticks = _total_ticks()
         cursor_token = encode_cursor(current_state, total_ticks, accumulated_bindings, tried_queries)
-        logger.info(
+        _flow_log(
             "flow: %s -> stopped (budget, %d ticks, %.1fms)",
             current_state,
             total_ticks,

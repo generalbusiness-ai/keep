@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from pathlib import Path
 
+from .compute_context import apply_context_attrs, current_counters
+from .tracing import get_tracer
+
 logger = logging.getLogger(__name__)
+
+_tracer = get_tracer("processors")
 
 
 # --- Hash functions (used by OCR processing and document dedup) ---
@@ -70,7 +76,21 @@ def _llm_summarize(
             "You are a helpful assistant that summarizes content. "
             "Follow the instructions in the user message."
         )
-    result = gen(system, user_prompt)
+    with _tracer.start_as_current_span(
+        "summarize.request",
+        attributes={
+            "provider": type(provider).__name__,
+            "content_len": len(content),
+            "truncated_len": len(truncated),
+            "kind": "llm",
+        },
+    ) as span:
+        apply_context_attrs(span)
+        t0 = time.monotonic()
+        result = gen(system, user_prompt)
+        ms = (time.monotonic() - t0) * 1000.0
+    if (c := current_counters()) is not None:
+        c.add_summarize(ms=ms)
     if result is None:
         return None
     return strip_summary_preamble(result)
@@ -89,8 +109,22 @@ def process_summarize(
         context=context, system_prompt_override=system_prompt_override,
     )
     if summary is None:
-        # Non-LLM fallback (truncate, first_paragraph)
-        summary = summarization_provider.summarize(content, context=context)
+        # Non-LLM fallback (truncate, first_paragraph) — record as a summarize call
+        # too, since it's the same operation from the caller's POV.
+        with _tracer.start_as_current_span(
+            "summarize.request",
+            attributes={
+                "provider": type(summarization_provider).__name__,
+                "content_len": len(content),
+                "kind": "fallback",
+            },
+        ) as span:
+            apply_context_attrs(span)
+            t0 = time.monotonic()
+            summary = summarization_provider.summarize(content, context=context)
+            ms = (time.monotonic() - t0) * 1000.0
+        if (c := current_counters()) is not None:
+            c.add_summarize(ms=ms)
     return {"summary": summary}
 
 
@@ -98,7 +132,19 @@ def ocr_image(path: Path, content_type: str, extractor) -> str | None:
     """OCR a single image file.  Returns cleaned text or None."""
     from .providers.documents import FileDocumentProvider
 
-    text = extractor.extract(str(path), content_type)
+    with _tracer.start_as_current_span(
+        "extract.image",
+        attributes={
+            "extractor": type(extractor).__name__,
+            "content_type": content_type,
+        },
+    ) as span:
+        apply_context_attrs(span)
+        t0 = time.monotonic()
+        text = extractor.extract(str(path), content_type)
+        ms = (time.monotonic() - t0) * 1000.0
+    if (c := current_counters()) is not None:
+        c.add_extract(ms=ms)
     if not text:
         return None
     cleaned = FileDocumentProvider._clean_ocr_text(text)
@@ -114,7 +160,19 @@ def ocr_pdf(path: Path, ocr_pages: list[int], extractor) -> str | None:
     from .providers.documents import FileDocumentProvider
 
     file_provider = FileDocumentProvider()
-    ocr_results = file_provider._ocr_pdf_pages(path, ocr_pages, extractor=extractor)
+    with _tracer.start_as_current_span(
+        "extract.pdf",
+        attributes={
+            "extractor": type(extractor).__name__,
+            "page_count": len(ocr_pages),
+        },
+    ) as span:
+        apply_context_attrs(span)
+        t0 = time.monotonic()
+        ocr_results = file_provider._ocr_pdf_pages(path, ocr_pages, extractor=extractor)
+        ms = (time.monotonic() - t0) * 1000.0
+    if (c := current_counters()) is not None:
+        c.add_extract(ms=ms)
 
     if not ocr_results:
         return None

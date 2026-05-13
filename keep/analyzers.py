@@ -11,8 +11,10 @@ import hashlib
 import json
 import logging
 import re
+import time
 from collections.abc import Iterable
 
+from .compute_context import apply_context_attrs, current_counters
 from .providers.base import AnalysisChunk, AnalyzerProvider, get_registry, strip_summary_preamble
 from .tracing import get_tracer
 
@@ -585,8 +587,13 @@ class SlidingWindowAnalyzer:
             with tracer.start_as_current_span(
                 "analyze.single_pass.provider",
                 attributes={"prompt_chars": len(user_prompt)},
-            ):
+            ) as _gen_span:
+                apply_context_attrs(_gen_span)
+                _t0 = time.monotonic()
                 result = provider.generate(system_prompt, user_prompt, max_tokens=4096)
+                _gen_ms = (time.monotonic() - _t0) * 1000.0
+            if (c := current_counters()) is not None:
+                c.add_analyze(ms=_gen_ms)
             if result:
                 with tracer.start_as_current_span(
                     "analyze.single_pass.parse",
@@ -627,8 +634,13 @@ class SlidingWindowAnalyzer:
             with tracer.start_as_current_span(
                 "analyze.window.provider",
                 attributes={"prompt_chars": len(prompt)},
-            ):
+            ) as _gen_span:
+                apply_context_attrs(_gen_span)
+                _t0 = time.monotonic()
                 result = provider.generate(system_prompt, prompt, max_tokens=4096)
+                _gen_ms = (time.monotonic() - _t0) * 1000.0
+            if (c := current_counters()) is not None:
+                c.add_analyze(ms=_gen_ms)
             if result:
                 with tracer.start_as_current_span(
                     "analyze.window.parse",
@@ -780,11 +792,20 @@ class SinglePassAnalyzer:
             )
 
         try:
-            result = provider.generate(
-                DECOMPOSITION_SYSTEM_PROMPT,
-                user_prompt,
-                max_tokens=4096,
-            )
+            with tracer.start_as_current_span(
+                "analyze.decomposition.provider",
+                attributes={"prompt_chars": len(user_prompt)},
+            ) as _gen_span:
+                apply_context_attrs(_gen_span)
+                _t0 = time.monotonic()
+                result = provider.generate(
+                    DECOMPOSITION_SYSTEM_PROMPT,
+                    user_prompt,
+                    max_tokens=4096,
+                )
+                _gen_ms = (time.monotonic() - _t0) * 1000.0
+            if (c := current_counters()) is not None:
+                c.add_analyze(ms=_gen_ms)
             if result:
                 return _parse_decomposition_json(result)
             logger.warning(
@@ -1095,8 +1116,13 @@ class TagClassifier:
             with tracer.start_as_current_span(
                 "analyze.classify.provider",
                 attributes={"prompt_chars": len(user_prompt)},
-            ):
+            ) as _gen_span:
+                apply_context_attrs(_gen_span)
+                _t0 = time.monotonic()
                 result = provider.generate(system_prompt, user_prompt, max_tokens=2048)
+                _gen_ms = (time.monotonic() - _t0) * 1000.0
+            if (c := current_counters()) is not None:
+                c.add_analyze(ms=_gen_ms)
             if result:
                 with tracer.start_as_current_span(
                     "analyze.classify.apply",
