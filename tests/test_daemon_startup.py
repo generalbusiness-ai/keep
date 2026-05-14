@@ -1,6 +1,7 @@
 """Tests for daemon startup sequencing and deferred maintenance."""
 
 import sys
+import time
 from runpy import run_path
 from unittest.mock import MagicMock, patch
 
@@ -242,3 +243,158 @@ def test_daemon_failure_backoff_caps_under_thirty_seconds():
     assert _daemon_failure_backoff_seconds(2) == 1.0
     assert _daemon_failure_backoff_seconds(5) == 8.0
     assert _daemon_failure_backoff_seconds(20) == 8.0
+
+
+def test_resolve_daemon_idle_exit_seconds_default_when_unset():
+    from keep.console_support import _resolve_daemon_idle_exit_seconds
+    from keep.const import DAEMON_IDLE_EXIT_SECONDS
+
+    assert _resolve_daemon_idle_exit_seconds({}) == float(DAEMON_IDLE_EXIT_SECONDS)
+
+
+def test_resolve_daemon_idle_exit_seconds_default_when_blank():
+    from keep.console_support import _resolve_daemon_idle_exit_seconds
+    from keep.const import DAEMON_IDLE_EXIT_SECONDS
+
+    assert _resolve_daemon_idle_exit_seconds({"KEEP_DAEMON_IDLE_SECONDS": ""}) == float(
+        DAEMON_IDLE_EXIT_SECONDS
+    )
+
+
+def test_resolve_daemon_idle_exit_seconds_default_when_invalid():
+    from keep.console_support import _resolve_daemon_idle_exit_seconds
+    from keep.const import DAEMON_IDLE_EXIT_SECONDS
+
+    assert _resolve_daemon_idle_exit_seconds(
+        {"KEEP_DAEMON_IDLE_SECONDS": "ten minutes"}
+    ) == float(DAEMON_IDLE_EXIT_SECONDS)
+
+
+def test_resolve_daemon_idle_exit_seconds_zero_disables_deadline():
+    from keep.console_support import _resolve_daemon_idle_exit_seconds
+
+    # 0 is the documented "never idle-exit" sentinel used by supervised setups.
+    assert _resolve_daemon_idle_exit_seconds({"KEEP_DAEMON_IDLE_SECONDS": "0"}) == 0.0
+
+
+def test_resolve_daemon_idle_exit_seconds_clamps_negative_to_zero():
+    from keep.console_support import _resolve_daemon_idle_exit_seconds
+
+    # Treat any sub-zero value as the disable sentinel rather than letting it
+    # wrap around and exit on the first idle tick.
+    assert _resolve_daemon_idle_exit_seconds(
+        {"KEEP_DAEMON_IDLE_SECONDS": "-30"}
+    ) == 0.0
+
+
+def test_resolve_daemon_idle_exit_seconds_accepts_positive_override():
+    from keep.console_support import _resolve_daemon_idle_exit_seconds
+
+    assert _resolve_daemon_idle_exit_seconds(
+        {"KEEP_DAEMON_IDLE_SECONDS": "45"}
+    ) == 45.0
+
+
+class _FakeQueue:
+    def __init__(self, *, count: int = 0, delegated: int = 0):
+        self._count = count
+        self._delegated = delegated
+
+    def count(self) -> int:
+        return self._count
+
+    def count_delegated(self) -> int:
+        return self._delegated
+
+
+class _FakeKeeper:
+    """Bare keeper stand-in for unit-testing _maybe_wait_for_daemon_idle."""
+
+    def __init__(self, *, pending: int = 0, delegated: int = 0, flow: int = 0):
+        self._pending_queue = _FakeQueue(count=pending, delegated=delegated)
+        self._flow = flow
+
+    def pending_work_count(self) -> int:
+        return self._flow
+
+
+def _no_sleep(_delay: float) -> None:
+    """wait_or_shutdown stub that never blocks — keeps unit tests fast."""
+
+
+def test_maybe_wait_for_daemon_idle_returns_queued_work_for_pending_retries():
+    from keep.console_support import (
+        DAEMON_IDLE_QUEUED_WORK,
+        _maybe_wait_for_daemon_idle,
+    )
+
+    state = _maybe_wait_for_daemon_idle(
+        _FakeKeeper(pending=3),
+        logger=MagicMock(),
+        last_replenish_ts=0.0,
+        replenish_interval=1800.0,
+        wait_or_shutdown=_no_sleep,
+    )
+    assert state == DAEMON_IDLE_QUEUED_WORK
+
+
+def test_maybe_wait_for_daemon_idle_returns_user_intent_for_active_watch():
+    from keep.console_support import (
+        DAEMON_IDLE_USER_INTENT,
+        _maybe_wait_for_daemon_idle,
+    )
+
+    with (
+        patch("keep.watches.has_active_watches", return_value=True),
+        patch("keep.watches.load_watches", return_value=[]),
+        patch("keep.watches.next_check_delay", return_value=30.0),
+    ):
+        state = _maybe_wait_for_daemon_idle(
+            _FakeKeeper(),
+            logger=MagicMock(),
+            last_replenish_ts=0.0,
+            replenish_interval=1800.0,
+            wait_or_shutdown=_no_sleep,
+        )
+    assert state == DAEMON_IDLE_USER_INTENT
+
+
+def test_maybe_wait_for_daemon_idle_returns_housekeeping_for_replenish_timer_only():
+    # The replenish timer must NOT mask the idle-exit deadline. Without this
+    # distinction an otherwise-idle daemon would never exit because the
+    # timestamp gets refreshed on every tick.
+    from keep.console_support import (
+        DAEMON_IDLE_HOUSEKEEPING,
+        _maybe_wait_for_daemon_idle,
+    )
+
+    with (
+        patch("keep.watches.has_active_watches", return_value=False),
+        patch("keep.markdown_mirrors.list_markdown_mirrors", return_value=[]),
+    ):
+        state = _maybe_wait_for_daemon_idle(
+            _FakeKeeper(),
+            logger=MagicMock(),
+            last_replenish_ts=time.time(),
+            replenish_interval=1800.0,
+            wait_or_shutdown=_no_sleep,
+        )
+    assert state == DAEMON_IDLE_HOUSEKEEPING
+
+
+def test_maybe_wait_for_daemon_idle_returns_none_when_nothing_pending():
+    from keep.console_support import _maybe_wait_for_daemon_idle
+
+    # last_replenish_ts past the interval window — no housekeeping work due.
+    with (
+        patch("keep.watches.has_active_watches", return_value=False),
+        patch("keep.markdown_mirrors.list_markdown_mirrors", return_value=[]),
+    ):
+        state = _maybe_wait_for_daemon_idle(
+            _FakeKeeper(),
+            logger=MagicMock(),
+            last_replenish_ts=time.time() - 3600.0,
+            replenish_interval=1800.0,
+            wait_or_shutdown=_no_sleep,
+        )
+    assert state is None

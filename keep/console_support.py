@@ -25,6 +25,7 @@ import typer
 from typing_extensions import Annotated
 
 from .const import (
+    DAEMON_IDLE_EXIT_SECONDS,
     DAEMON_PORT,
     DAEMON_PORT_FILE,
     DAEMON_TOKEN_FILE,
@@ -1486,6 +1487,14 @@ def run_pending_daemon(
     _pending_batch_limit = 64
     _consecutive_failure_ticks = 0
 
+    # Idle-exit deadline. The daemon exits when it has been idle (no processed
+    # or failed work, no flow activity, no active watches/mirrors/timers) for
+    # this many seconds. KEEP_DAEMON_IDLE_SECONDS=0 disables the deadline so
+    # the daemon stays alive until signalled (intended for users running keep
+    # under launchd / systemd supervision).
+    _idle_exit_seconds = _resolve_daemon_idle_exit_seconds()
+    _last_activity_ts = time.time()
+
     _version_file = kp._store_path / ".processor.version"
 
     try:
@@ -1570,16 +1579,38 @@ def run_pending_daemon(
                 continue
             _consecutive_failure_ticks = 0
             flow_activity = _daemon_has_flow_activity(flow_result)
+            if result["processed"] > 0 or result["failed"] > 0 or delegated > 0 or flow_activity:
+                _last_activity_ts = time.time()
             if result["processed"] == 0 and result["failed"] == 0 and delegated == 0 and not flow_activity:
-                if _maybe_wait_for_daemon_idle(
+                idle_state = _maybe_wait_for_daemon_idle(
                     kp,
                     logger=_daemon_logger,
                     last_replenish_ts=_last_replenish_ts,
                     replenish_interval=_REPLENISH_INTERVAL,
                     wait_or_shutdown=wait_or_shutdown,
-                ):
+                )
+                # Reset the idle deadline only for *user-visible* reasons to
+                # keep the daemon resident. Internal housekeeping (the
+                # supernode replenish timer) sleeps without resetting the
+                # deadline, so an otherwise idle daemon still exits on time.
+                if idle_state in (DAEMON_IDLE_QUEUED_WORK, DAEMON_IDLE_USER_INTENT):
+                    _last_activity_ts = time.time()
+                    continue
+                if idle_state == DAEMON_IDLE_HOUSEKEEPING:
+                    idle_for = time.time() - _last_activity_ts
+                    if _idle_exit_seconds > 0 and idle_for >= _idle_exit_seconds:
+                        _daemon_logger.info(
+                            "Daemon idle for %.0fs (limit %.0fs); exiting. "
+                            "Set KEEP_DAEMON_IDLE_SECONDS=0 to disable.",
+                            idle_for, _idle_exit_seconds,
+                        )
+                        break
                     continue
 
+                # idle_state is None: no work, no watches, no mirrors, no
+                # housekeeping timer. Probe once more after a 1s sleep in
+                # case work arrived between the first probe and now; if
+                # still idle, check the deadline.
                 wait_or_shutdown(1)
                 if shutdown_state["requested"]:
                     break
@@ -1598,7 +1629,16 @@ def run_pending_daemon(
                     and result.get("delegated", 0) == 0
                     and not flow_activity
                 ):
-                    break
+                    idle_for = time.time() - _last_activity_ts
+                    if _idle_exit_seconds > 0 and idle_for >= _idle_exit_seconds:
+                        _daemon_logger.info(
+                            "Daemon idle for %.0fs (limit %.0fs); exiting. "
+                            "Set KEEP_DAEMON_IDLE_SECONDS=0 to disable.",
+                            idle_for, _idle_exit_seconds,
+                        )
+                        break
+                    continue
+                _last_activity_ts = time.time()
                 _log_daemon_batch_result(
                     logger=_daemon_logger,
                     result=result,
@@ -1914,6 +1954,25 @@ def _daemon_failure_backoff_seconds(
     return min(delay, float(cap))
 
 
+def _resolve_daemon_idle_exit_seconds(env: dict[str, str] | None = None) -> float:
+    """Parse the daemon idle-exit deadline from ``KEEP_DAEMON_IDLE_SECONDS``.
+
+    Returns the configured deadline in seconds, or :data:`DAEMON_IDLE_EXIT_SECONDS`
+    if the env var is unset or malformed. Negative values are clamped to 0
+    (which disables the deadline so the daemon stays alive until signalled —
+    used by supervised launchd/systemd deployments).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get("KEEP_DAEMON_IDLE_SECONDS")
+    if raw is None or raw == "":
+        return float(DAEMON_IDLE_EXIT_SECONDS)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(DAEMON_IDLE_EXIT_SECONDS)
+    return max(value, 0.0)
+
+
 def _log_daemon_batch_result(*, logger, result: dict[str, Any], delegated: int, flow_result: dict[str, Any], drain: bool = False) -> None:
     """Emit a consistent batch-progress log line for daemon work ticks."""
     flow_processed = int(flow_result.get("processed", 0))
@@ -1938,6 +1997,11 @@ def _log_daemon_batch_result(*, logger, result: dict[str, Any], delegated: int, 
     )
 
 
+DAEMON_IDLE_QUEUED_WORK = "queued_work"
+DAEMON_IDLE_USER_INTENT = "user_intent"
+DAEMON_IDLE_HOUSEKEEPING = "housekeeping"
+
+
 def _maybe_wait_for_daemon_idle(
     kp,
     *,
@@ -1945,8 +2009,22 @@ def _maybe_wait_for_daemon_idle(
     last_replenish_ts: float,
     replenish_interval: float,
     wait_or_shutdown,
-) -> bool:
-    """Sleep when the daemon is idle but has background timers or queued retries."""
+) -> str | None:
+    """Sleep when the daemon is idle but has background timers or queued retries.
+
+    Returns a classification of *why* the daemon should keep running, so the
+    caller can decide whether the idle-exit deadline should reset:
+
+    - ``"queued_work"``: delegated/flow/pending-retry items pending. Keeps
+      the daemon alive and resets the deadline.
+    - ``"user_intent"``: registered watches or markdown mirrors. Keeps the
+      daemon alive and resets the deadline.
+    - ``"housekeeping"``: only internal timers (supernode replenish) are
+      due. Sleeps for the timer, but does **not** reset the idle deadline —
+      otherwise the replenish timer alone would keep an otherwise idle
+      daemon resident indefinitely.
+    - ``None``: nothing is pending. Caller decides whether to exit.
+    """
     from .markdown_mirrors import (
         has_active_markdown_mirrors,
         list_markdown_mirrors,
@@ -1964,31 +2042,30 @@ def _maybe_wait_for_daemon_idle(
     if delegated_remaining > 0:
         logger.info("Waiting for %d delegated tasks", delegated_remaining)
         wait_or_shutdown(5)
-        return True
+        return DAEMON_IDLE_QUEUED_WORK
     if flow_remaining > 0:
         logger.info("Waiting for %d flow work items", flow_remaining)
         wait_or_shutdown(1)
-        return True
+        return DAEMON_IDLE_QUEUED_WORK
     if pending_remaining > 0:
         logger.info("Waiting for %d pending items (retry backoff)", pending_remaining)
         wait_or_shutdown(5)
-        return True
+        return DAEMON_IDLE_QUEUED_WORK
 
-    has_timers = has_active_watches(kp)
-    mirrors = list_markdown_mirrors(kp) if not has_timers else []
-    if not has_timers:
-        has_timers = any(m.enabled for m in mirrors)
-    if not has_timers:
-        has_timers = (
-            last_replenish_ts == 0
-            or (time.time() - last_replenish_ts) < replenish_interval
-        )
-    if not has_timers:
-        return False
+    has_watches = has_active_watches(kp)
+    mirrors = list_markdown_mirrors(kp) if not has_watches else []
+    has_mirrors = any(m.enabled for m in mirrors)
+    has_user_intent = has_watches or has_mirrors
+    has_housekeeping = (
+        last_replenish_ts == 0
+        or (time.time() - last_replenish_ts) < replenish_interval
+    )
+    if not has_user_intent and not has_housekeeping:
+        return None
 
-    if has_active_watches(kp):
+    if has_watches:
         delay = next_check_delay(load_watches(kp))
-    elif mirrors and any(m.enabled for m in mirrors):
+    elif has_mirrors:
         delay = next_markdown_mirror_delay(mirrors)
     else:
         time_to_replenish = max(0, replenish_interval - (time.time() - last_replenish_ts))
@@ -1996,7 +2073,7 @@ def _maybe_wait_for_daemon_idle(
     delay = max(1.0, min(delay, 60.0))
     logger.debug("Sleeping %.1fs (timer events pending)", delay)
     wait_or_shutdown(delay)
-    return True
+    return DAEMON_IDLE_USER_INTENT if has_user_intent else DAEMON_IDLE_HOUSEKEEPING
 
 
 def print_pending_list_lightweight(store_path: "Path") -> None:

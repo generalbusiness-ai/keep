@@ -33,7 +33,17 @@ The daemon also services:
 - **Markdown sync mirrors** registered via `keep data export --sync`
 - **Timer-driven background work** such as replenishment and retry cycles
 
-When there's no work and no active watches or mirrors, the daemon exits after an idle timeout.
+As long as at least one watch, mirror, or scheduled timer (e.g. supernode
+replenish) is active, the daemon stays running and polls them on schedule.
+With no pending work, no active watches or mirrors, and no due timers, the
+daemon waits out the **idle-exit deadline** (10 minutes by default) and
+then exits to release its resources. Subsequent `keep` commands auto-start
+a fresh daemon on demand.
+
+The deadline is configurable via the `KEEP_DAEMON_IDLE_SECONDS` environment
+variable. Set it to `0` to disable the deadline entirely — the daemon will
+then run until signalled, intended for users running the daemon under
+launchd or systemd supervision (see [Running as a service](#running-as-a-service)).
 
 ## Flags
 
@@ -108,6 +118,140 @@ keep data export --list
 ```
 
 See [keep data](KEEP-DATA.md) for full sync documentation.
+
+## Running as a service
+
+Once started, the daemon stays alive as long as there's a registered watch,
+mirror, or pending work, or it's still within the idle-exit deadline — see
+[What it does](#what-it-does) above for the exact conditions. What it
+doesn't survive on its own is a crash, an OS-level `kill`, or a reboot:
+there's no built-in supervisor. For interactive use that's fine — the next
+`keep` command auto-starts a fresh daemon. For unattended workflows that
+rely on watches firing or queues draining without anyone running `keep` in
+the foreground, install the daemon as a user service so it comes back
+automatically. Without supervision, a daemon that dies leaves watches
+dormant and queued work silent; the only surface for the backlog is
+`keep daemon --list`.
+
+When running under a supervisor, set `KEEP_DAEMON_IDLE_SECONDS=0` so the
+daemon doesn't intentionally idle-exit and force the supervisor to respawn
+it. Both example units below set this.
+
+### macOS (launchd)
+
+Save the following to
+`~/Library/LaunchAgents/ai.keepnotes.keep-daemon.plist`. Replace `USERNAME`
+with your account, and replace `/Users/USERNAME/.local/bin/keep` with the
+actual path from `which keep`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.keepnotes.keep-daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USERNAME/.local/bin/keep</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/USERNAME/.local/bin</string>
+    <key>HOME</key><string>/Users/USERNAME</string>
+    <key>KEEP_STORE_PATH</key><string>/Users/USERNAME/.keep</string>
+    <key>KEEP_DAEMON_IDLE_SECONDS</key><string>0</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/USERNAME/.keep/keep-daemon.log</string>
+  <key>StandardErrorPath</key><string>/Users/USERNAME/.keep/keep-daemon.log</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+</dict>
+</plist>
+```
+
+Load it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/ai.keepnotes.keep-daemon.plist
+```
+
+Key fields:
+
+- `RunAtLoad` starts the daemon at login.
+- `KeepAlive` makes launchd respawn the daemon after a crash or `kill -9`.
+- `ThrottleInterval` caps respawn frequency at once per 10 seconds, so a
+  fundamentally broken daemon won't burn CPU in a tight crash loop.
+
+Logs land in `~/.keep/keep-daemon.log` (`tail -F` to watch live).
+
+To stop or remove:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/ai.keepnotes.keep-daemon.plist
+rm ~/Library/LaunchAgents/ai.keepnotes.keep-daemon.plist
+```
+
+### Linux (systemd user unit)
+
+Save the following to `~/.config/systemd/user/keep-daemon.service`. Replace
+`/home/USERNAME/.local/bin/keep` with the actual path from `which keep`:
+
+```ini
+[Unit]
+Description=Keep daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/home/USERNAME/.local/bin/keep daemon
+Environment=KEEP_STORE_PATH=%h/.keep
+Environment=KEEP_DAEMON_IDLE_SECONDS=0
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+Enable and start:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now keep-daemon.service
+```
+
+On headless boxes where you aren't logged in interactively, allow the user
+manager to run without an active session:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+Logs are available via `journalctl --user -u keep-daemon`.
+
+To stop or remove:
+
+```bash
+systemctl --user disable --now keep-daemon.service
+rm ~/.config/systemd/user/keep-daemon.service
+```
+
+### Verifying supervision
+
+After installing either service, confirm respawn works:
+
+```bash
+keep daemon --stop
+sleep 15
+keep daemon --list      # should not print "Starting daemon..."
+```
+
+If the daemon is still down after the wait, check the service log
+(`~/.keep/keep-daemon.log` on macOS, `journalctl --user -u keep-daemon` on
+Linux). Backlog that accumulated while the daemon was down can be reset
+with `keep daemon --retry`.
 
 ## Common workflows
 

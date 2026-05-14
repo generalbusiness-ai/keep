@@ -16,6 +16,13 @@ DAEMON_TOKEN_FILE = ".daemon.token"
 DAEMON_PID_FILE = ".daemon.pid"
 OPS_LOG_FILE = "keep-ops.log"
 
+# Seconds the daemon may run with zero processed work, zero failed work, zero
+# flow activity, and no active watches/mirrors/timers before it exits and
+# releases its resources. Set to 0 to disable idle-exit entirely (the daemon
+# only stops on signal or version-restart). Override at runtime with the
+# KEEP_DAEMON_IDLE_SECONDS environment variable.
+DAEMON_IDLE_EXIT_SECONDS = 600
+
 # -- SQLite --
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
