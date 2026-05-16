@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+message_file=$1
+
+if grep -Eiq '^[[:space:]]*co-authored-by[[:space:]]*:' "$message_file"; then
+  echo "error: commit message must not contain Co-authored-by trailers" >&2
+  exit 1
+fi

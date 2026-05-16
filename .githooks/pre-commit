@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if command -v pre-commit >/dev/null 2>&1; then
+  exec pre-commit hook-impl --config=.pre-commit-config.yaml --hook-type=pre-commit --hook-dir .githooks -- "$@"
+fi
+
+echo "error: pre-commit not found. Install with: uv tool install pre-commit" >&2
+exit 1
