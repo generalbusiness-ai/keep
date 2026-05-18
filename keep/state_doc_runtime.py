@@ -867,14 +867,31 @@ class _EnvActionContext:
             return ""
         return str(gather(item_id, tags) or "")
 
-    def gather_analyze_chunks(self, item_id: str, item: Any) -> Any:
+    def gather_analyze_chunks(
+        self, item_id: str, item: Any, *, since_version: int | None = None,
+    ) -> Any:
         gather = getattr(self._env, "gather_analyze_chunks", None)
         if gather is None:
             return []
-        return gather(item_id, item)
+        return gather(item_id, item, since_version=since_version)
 
     def gather_guide_context(self, tags: list[str]) -> str:
         gather = getattr(self._env, "gather_guide_context", None)
         if gather is None:
             return ""
         return str(gather(tags) or "")
+
+    def load_prompt_doc(self, doc_id: str, *, required: bool = False) -> str | None:
+        load = getattr(self._env, "load_prompt_doc", None)
+        if load is None:
+            return None
+        return load(doc_id, required=required)
+
+    def max_part_num(self, item_id: str) -> int:
+        get_max = getattr(self._env, "max_part_num", None)
+        if get_max is None:
+            return 0
+        try:
+            return int(get_max(item_id) or 0)
+        except Exception:
+            return 0

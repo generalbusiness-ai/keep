@@ -363,7 +363,7 @@ class TestRunLocalTask:
         result = run_local_task(kp, req)
 
         assert result.status == "applied"
-        kp._gather_analyze_chunks.assert_called_once_with("d1", mock_item)
+        kp._gather_analyze_chunks.assert_called_once_with("d1", mock_item, since_version=None)
         kp._gather_guide_context.assert_called_once_with(["topic"])
         analyze_args = mock_analyzer.analyze.call_args.args
         assert len(analyze_args[0]) == 2

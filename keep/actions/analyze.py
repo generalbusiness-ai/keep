@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from ..analyzers import DEFAULT_CONTEXT_BUDGET, _estimate_tokens, _parse_parts
 from ..processors import process_analyze
 from ..providers.base import AnalysisChunk
 from ..tracing import get_tracer
@@ -65,6 +66,25 @@ def _params_force(params: dict[str, Any]) -> bool:
     return False
 
 
+def _resolve_since_version(item_tags: dict[str, Any]) -> int | None:
+    """Return the last analyzed version for incremental gather, if vstring.
+
+    URI-backed items don't have an analyzable version thread — they are
+    re-fetched as a single chunk each time, so incremental gather makes
+    no sense for them. A missing or unparseable ``_analyzed_version``
+    means this is the first analyze for the item; fall back to full.
+    """
+    if item_tags.get("_source") == "uri":
+        return None
+    raw = item_tags.get("_analyzed_version")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _throttle_skip_reason(item_tags: dict[str, Any]) -> str | None:
     """If `_analyzed_at` is within the throttle window, return a skip reason.
 
@@ -103,16 +123,45 @@ class Analyze:
         item_tags = dict(getattr(item, "tags", None) or {})
         item_summary = str(getattr(item, "summary", "") or "")
 
-        if prepared.get("chunks") is None:
+        # Pick incremental gather when the item is a vstring (not a URI-backed
+        # source) and we already analyzed an earlier version. Forced runs go
+        # back to a full pass so a re-analyze can rebuild parts from scratch.
+        force = _params_force(prepared)
+        since_version = _resolve_since_version(item_tags) if not force else None
+
+        # Force must wipe any caller-prepared chunks so we actually re-gather.
+        # Two callers leave chunks pre-populated: (a) run_local_task() invokes
+        # prepare() once up front, then passes the prepared params straight
+        # into run(); (b) _run_incremental()'s over-budget fallback recurses
+        # via self.run({**params, "force": True}, context). Without this
+        # clear, the gather condition below sees chunks_targets and skips —
+        # the fallback then loops back into _run_incremental() and recurses
+        # until RecursionError.
+        if force:
+            for key in (
+                "chunks", "chunks_context", "chunks_targets",
+                "incremental_prompt",
+            ):
+                prepared.pop(key, None)
+
+        if prepared.get("chunks") is None and prepared.get("chunks_targets") is None:
             gather_chunks = getattr(context, "gather_analyze_chunks", None)
             if callable(gather_chunks):
                 with tracer.start_as_current_span(
                     "analyze.prepare.chunks",
-                    attributes={"item_id": item_id},
+                    attributes={
+                        "item_id": item_id,
+                        "since_version": since_version if since_version is not None else -1,
+                    },
                 ):
-                    chunk_data = gather_chunks(item_id, item)
+                    chunk_data = gather_chunks(
+                        item_id, item, since_version=since_version,
+                    )
                 if isinstance(chunk_data, dict):
-                    prepared["chunks"] = list(chunk_data.get("context", [])) + list(chunk_data.get("targets", []))
+                    # Incremental shape — keep context and targets separate so
+                    # run() can build the <analyze>-marked single-window prompt.
+                    prepared["chunks_context"] = list(chunk_data.get("context", []))
+                    prepared["chunks_targets"] = list(chunk_data.get("targets", []))
                 elif isinstance(chunk_data, list):
                     prepared["chunks"] = chunk_data
 
@@ -148,13 +197,33 @@ class Analyze:
             if prompt_text is not None:
                 prepared["prompt_override"] = prompt_text
 
+        # When we're going to take the incremental path, also pre-load the
+        # `.prompt/analyze/incremental` doc. It's required for that path —
+        # surfacing the missing-doc error here keeps run() simpler.
+        if (
+            prepared.get("chunks_targets")
+            and prepared.get("incremental_prompt") is None
+            and hasattr(context, "load_prompt_doc")
+        ):
+            with tracer.start_as_current_span(
+                "analyze.prepare.incremental_prompt",
+                attributes={"item_id": item_id},
+            ):
+                prepared["incremental_prompt"] = context.load_prompt_doc(
+                    ".prompt/analyze/incremental", required=True,
+                )
+
         return prepared
 
     def build_delegated_payload(
         self, params: dict[str, Any], content: str,
     ) -> tuple[str, dict[str, Any] | None]:
         metadata: dict[str, Any] = {}
-        for key in ("chunks", "guide_context", "tag_specs", "prompt_override"):
+        for key in (
+            "chunks", "chunks_context", "chunks_targets",
+            "guide_context", "tag_specs",
+            "prompt_override", "incremental_prompt",
+        ):
             value = params.get(key)
             if value:
                 metadata[key] = value
@@ -189,6 +258,24 @@ class Analyze:
         prompt_text = prepared.get("prompt_override")
         if prompt_text is None:
             raise ValueError("missing prompt doc for analyze")
+
+        # Incremental path: prepare() supplied {context, targets} separately.
+        # The whole point is to look only at the recent versions (the targets)
+        # against a small overlap of already-analyzed context — one LLM call
+        # for the new trajectory, append-only parts on disk.
+        target_chunks = prepared.get("chunks_targets")
+        if isinstance(target_chunks, list) and target_chunks:
+            context_chunks = prepared.get("chunks_context") or []
+            return self._run_incremental(
+                item_id, item_tags, item_summary,
+                context_chunks=list(context_chunks),
+                target_chunks=list(target_chunks),
+                guide_context=guide_context,
+                incremental_prompt=prepared.get("incremental_prompt"),
+                tag_specs=prepared.get("tag_specs"),
+                context=context,
+                params=params,
+            )
 
         raw_chunks = prepared.get("chunks")
         if isinstance(raw_chunks, list) and raw_chunks:
@@ -353,3 +440,188 @@ class Analyze:
 
         out["mutations"] = mutations
         return out
+
+    def _run_incremental(
+        self,
+        item_id: str,
+        item_tags: dict[str, Any],
+        item_summary: str,
+        *,
+        context_chunks: list[dict[str, Any]],
+        target_chunks: list[dict[str, Any]],
+        guide_context: str,
+        incremental_prompt: str | None,
+        tag_specs: Any,
+        context: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """One-shot incremental analysis of new versions over an overlap.
+
+        Prior context (already-analyzed versions) goes outside ``<analyze>``;
+        the new versions plus the current note state go inside. Parts emitted
+        here are appended to whatever already exists — we don't ``delete_prefix``
+        the way the full path does, so the previously-analyzed trajectory stays
+        intact and the LLM only narrates what's genuinely new.
+
+        Falls back to the full path when the assembled window would exceed
+        ``DEFAULT_CONTEXT_BUDGET`` — at that size the single-LLM-call savings
+        disappear and we'd rather rebuild the decomposition.
+        """
+        if not incremental_prompt:
+            raise ValueError("missing prompt doc for incremental analyze")
+
+        total_tokens = sum(
+            _estimate_tokens(str(c.get("content", "")))
+            for c in context_chunks + target_chunks
+        )
+        if total_tokens > DEFAULT_CONTEXT_BUDGET:
+            logger.info(
+                "Incremental analyze content too large (%d tokens > %d budget) "
+                "for %s — falling back to full analysis",
+                total_tokens, DEFAULT_CONTEXT_BUDGET, item_id,
+            )
+            # Strip the incremental keys before recursing so prepare() actually
+            # re-gathers as a full pass. force=True alone is not enough — the
+            # `if force: prepared.pop(...)` block in prepare() does the work,
+            # but we drop them here too as belt-and-braces in case a future
+            # refactor changes that contract.
+            fallback_params = {
+                k: v for k, v in params.items()
+                if k not in {
+                    "chunks", "chunks_context", "chunks_targets",
+                    "incremental_prompt",
+                }
+            }
+            fallback_params["force"] = True
+            return self.run(fallback_params, context)
+
+        prompt_parts: list[str] = ["<content>"]
+        for c in context_chunks:
+            prompt_parts.append(str(c.get("content", "")))
+        prompt_parts.append("<analyze>")
+        for c in target_chunks:
+            prompt_parts.append(str(c.get("content", "")))
+        prompt_parts.append("</analyze>")
+        prompt_parts.append("</content>")
+        user_prompt = "\n\n".join(prompt_parts)
+        if guide_context:
+            user_prompt = f"{guide_context}\n\n---\n\n{user_prompt}"
+
+        # Mirror Keeper.analyze()'s provider unwrapping — the caching wrapper
+        # exposes a `_provider` that hands back the raw generate() callable.
+        with tracer.start_as_current_span(
+            "analyze.incremental.resolve_provider",
+            attributes={"item_id": item_id},
+        ):
+            provider = context.resolve_provider("summarization")
+        raw_provider = provider
+        if hasattr(raw_provider, "_provider") and raw_provider._provider is not None:
+            raw_provider = raw_provider._provider
+
+        with tracer.start_as_current_span(
+            "analyze.incremental.provider",
+            attributes={
+                "item_id": item_id,
+                "context_chunks": len(context_chunks),
+                "target_chunks": len(target_chunks),
+                "prompt_chars": len(user_prompt),
+                "estimated_tokens": total_tokens,
+            },
+        ):
+            try:
+                result_text = raw_provider.generate(
+                    incremental_prompt, user_prompt, max_tokens=4096,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Incremental analyze LLM call failed for %s: %s", item_id, e,
+                )
+                result_text = None
+
+        raw_parts = _parse_parts(result_text) if result_text else []
+        parts = [_normalize_part(part) for part in raw_parts]
+
+        if isinstance(tag_specs, list) and tag_specs and parts:
+            filtered_specs = _filter_specs_by_when(
+                tag_specs, item_tags, item_id, item_summary,
+            )
+            if filtered_specs:
+                try:
+                    with tracer.start_as_current_span(
+                        "analyze.incremental.classify",
+                        attributes={
+                            "item_id": item_id,
+                            "part_count": len(parts),
+                            "spec_count": len(filtered_specs),
+                        },
+                    ):
+                        from ..analyzers import TagClassifier
+                        classifier = TagClassifier(
+                            provider=context.resolve_provider("summarization"),
+                        )
+                        parts = classifier.classify(parts, specs=filtered_specs)
+                except Exception:
+                    with tracer.start_as_current_span(
+                        "analyze.incremental.classify_fallback",
+                        attributes={"item_id": item_id, "part_count": len(parts)},
+                    ):
+                        parts = classify_parts_with_specs(
+                            parts, context, item_tags=item_tags,
+                            item_id=item_id, item_summary=item_summary,
+                        )
+
+        # Record _analyzed_version even when the LLM found nothing new — that
+        # is the correct signal that we have already considered these versions
+        # and should not analyze them again. Without this, every subsequent
+        # write would re-gather the same context/target pair.
+        mutations: list[dict[str, Any]] = []
+        doc = context.get_document(item_id) if hasattr(context, "get_document") else None
+
+        if parts:
+            # Continue part numbering from whatever's on disk so we don't
+            # collide with the existing parts (which we deliberately don't
+            # delete in the incremental path).
+            max_part = 0
+            get_max_part = getattr(context, "max_part_num", None)
+            if callable(get_max_part):
+                try:
+                    max_part = int(get_max_part(item_id) or 0)
+                except Exception:
+                    max_part = 0
+            for offset, part in enumerate(parts, start=1):
+                idx = max_part + offset
+                part["part_num"] = idx
+                tags = dict(part.get("tags") or {})
+                tags["_base_id"] = item_id
+                tags["_part_num"] = str(idx)
+                mutations.append(
+                    {
+                        "op": "put_item",
+                        "id": f"{item_id}@p{idx}",
+                        "summary": str(part.get("summary") or ""),
+                        "tags": tags,
+                        "queue_background_tasks": False,
+                    }
+                )
+
+        existing_tags = dict(getattr(doc, "tags", None) or {}) if doc else {}
+        content_hash = getattr(doc, "content_hash", None) if doc else None
+        if content_hash:
+            existing_tags["_analyzed_hash"] = content_hash
+            existing_tags["_analyzed_at"] = utc_now()
+            list_versions = getattr(context, "list_versions", None)
+            if callable(list_versions):
+                versions = list_versions(item_id, limit=1)
+                if versions:
+                    version = getattr(versions[0], "version", None)
+                    if version is not None:
+                        existing_tags["_analyzed_version"] = str(version)
+            mutations.append(
+                {
+                    "op": "set_tags",
+                    "target": item_id,
+                    "tags": existing_tags,
+                }
+            )
+
+        return {"parts": parts, "mutations": mutations, "incremental": True}

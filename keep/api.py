@@ -47,6 +47,7 @@ from .utils import (
 
 from .analyzers import (
     TagClassifier,
+    DEFAULT_CONTEXT_BUDGET,
     _estimate_tokens,
     _extract_line_ranges,
     _find_best_passage,
@@ -5604,7 +5605,43 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         versions = self._document_store.list_versions(doc_coll, id, limit=100)
 
         if since_version is not None and versions:
-            # Incremental: split versions into context (already analyzed) and targets (new)
+            # Detect backlog and *rebase to the newest window* when found.
+            #
+            # `list_versions(limit=100)` returns only the newest 100 versions.
+            # If more than 100 versions have accumulated since the last
+            # analyzed version, the gap between `since_version` and the
+            # oldest fetched version cannot be reconstructed from this
+            # window — and `_record_analyzed_tags` will advance
+            # `_analyzed_version` to the very latest version after the
+            # subsequent full pass.
+            #
+            # Intent: this is a *sliding window* decomposition, not an
+            # exhaustive log analyzer. For vstring items like `now`, what
+            # matters is the current trajectory (the most-recent window);
+            # older versions that fell off the cursor are historical noise.
+            # When backlog is detected we deliberately:
+            #   1. switch off the incremental path (drop the dict shape),
+            #   2. let the full path rebuild parts from the visible window,
+            #   3. allow the cursor to advance to latest, treating the
+            #      newest window as the new baseline.
+            # The gap is logged at WARNING so an operator can see when a
+            # daemon outage caused a rebase rather than a true catch-up.
+            chronological = list(reversed(versions))
+            oldest_fetched = chronological[0].version
+            if oldest_fetched > since_version + 1:
+                logger.warning(
+                    "Incremental analyze cursor for %s is older than the "
+                    "fetched window: since_version=%d, oldest_fetched=%d "
+                    "(%d versions in the gap will not be analyzed). "
+                    "Rebasing to the newest window via full analysis; "
+                    "_analyzed_version will advance to latest.",
+                    id, since_version, oldest_fetched,
+                    oldest_fetched - since_version - 1,
+                )
+                # Fall through to the flat-list path below.
+                since_version = None
+
+        if since_version is not None and versions:
             chronological = list(reversed(versions))
             context_versions = [v for v in chronological if v.version <= since_version]
             new_versions = [v for v in chronological if v.version > since_version]
@@ -5834,10 +5871,10 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                 for c in context_chunks + target_chunks
             )
             # If too large for single window, fall back to full analysis
-            if total_tokens > 12000:
+            if total_tokens > DEFAULT_CONTEXT_BUDGET:
                 logger.info(
-                    "Incremental content too large (%d tokens), falling back to full analysis: %s",
-                    total_tokens, id,
+                    "Incremental content too large (%d tokens > %d budget), falling back to full analysis: %s",
+                    total_tokens, DEFAULT_CONTEXT_BUDGET, id,
                 )
                 incremental = False
                 # Re-gather as full

@@ -24,7 +24,9 @@ Two modes, auto-detected:
 
 Parts are the structural counterpart to versions:
 - **Versions** (`@V{N}`) are temporal — each `put` adds one
-- **Parts** (`@P{N}`) are structural — each `analyze` replaces all parts
+- **Parts** (`@P{N}`) are structural — `analyze` replaces all parts on URI
+  sources and forced re-runs; on inline notes with version history it
+  appends new parts incrementally (see [Re-analysis](#re-analysis))
 
 ## Options
 
@@ -150,7 +152,8 @@ They are treated as derived data — immutable except for tag corrections.
   keep tag "doc:1@P{2}" -t topic=oauth2    # Fix a tag
   keep tag "doc:1@P{2}" -r topic            # Remove a tag
   ```
-- Re-analyze — `analyze` replaces all parts atomically
+- Re-analyze — `analyze` replaces all parts atomically (or appends new
+  parts in incremental mode for inline notes — see below)
 - Delete parent — removing the parent document removes its parts
 
 **Blocked:**
@@ -163,13 +166,33 @@ guidance tags). The right fix is a better prompt, not manual editing.
 
 ## Re-analysis
 
-Running `analyze` on changed content (or with `--force`) replaces all
-previous parts:
+Behavior depends on the source type and on whether prior analysis is recorded:
+
+- **URI sources, and first-time analyze on inline notes**: full decomposition.
+  All existing parts are replaced atomically.
+- **Inline notes with `_analyzed_version` already recorded**: incremental
+  decomposition. A small overlap of already-analyzed versions is included
+  as context, the new versions since the cursor are marked for analysis,
+  and only the *new* parts are appended — prior parts stay intact so the
+  analyzed trajectory accumulates over time rather than being rebuilt on
+  every write.
+- **`--force`**: skips the incremental path and rebuilds parts from scratch.
 
 ```bash
-keep analyze doc:1                    # Creates parts
-keep analyze doc:1 -t topic --force   # Re-analyze with guidance — replaces all parts
+keep analyze doc:1                    # Creates parts (or appends if incremental)
+keep analyze doc:1 -t topic --force   # Full re-analyze — replaces all parts
 ```
+
+### Sliding-window semantic for vstrings
+
+For inline notes that accumulate many versions (e.g. `now`), analyze is a
+*sliding window* over the most-recent versions, not an exhaustive log
+processor. When the analyze cursor falls more than ~100 versions behind
+the latest (a "backlog", typically caused by a daemon outage), the
+intermediate versions cannot be reconstructed from the analyze window;
+analyze logs a WARNING, rebases to the newest window via a full pass,
+and the cursor advances to the latest version. The gap is intentionally
+dropped — older versions are historical noise for trajectory analysis.
 
 ## Guidance tags
 

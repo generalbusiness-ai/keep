@@ -97,8 +97,8 @@ These are complementary dimensions of the same document:
 | &nbsp; | Versions (`@V{N}`) | Parts (`@P{N}`) |
 |---|---|---|
 | **Dimension** | Temporal | Structural |
-| **Created by** | `put` (each update adds one) | `analyze` (replaces all) |
-| **Accumulation** | Append-only chain | Full replacement |
+| **Created by** | `put` (each update adds one) | `analyze` (replaces on full pass, appends on incremental) |
+| **Accumulation** | Append-only chain | Full replacement, or append-only when incremental on a vstring |
 | **Purpose** | How knowledge evolved | What knowledge contains |
 
 A document can have both. A working session might have 30 versions (temporal) and 5 parts (thematic episodes extracted from the full history).

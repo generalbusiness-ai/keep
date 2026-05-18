@@ -404,6 +404,14 @@ _PROVIDER_BUDGET_FALLBACK: dict[str, int] = {
 # Default when nothing matches
 _DEFAULT_BUDGET = 6000
 
+# Single-window context budget used by ``SlidingWindowAnalyzer`` and the
+# incremental analyze paths.  Both the CLI (``Keeper.analyze``) and the
+# daemon flow action (``actions.analyze``) consult this value as the
+# threshold above which incremental analysis falls back to a full
+# sliding-window pass — the cap matches the analyzer's per-window budget
+# so a single-call incremental run can fit alongside its prompt.
+DEFAULT_CONTEXT_BUDGET = 12000
+
 
 def get_budget_for_model(model: str, provider: str = "") -> int:
     """Look up effective analysis budget for a model, with fallback."""
@@ -441,7 +449,7 @@ class SlidingWindowAnalyzer:
     def __init__(
         self,
         provider=None,
-        context_budget: int = 12000,
+        context_budget: int = DEFAULT_CONTEXT_BUDGET,
         target_ratio: float = 0.6,
         prompt: str | None = None,
     ):

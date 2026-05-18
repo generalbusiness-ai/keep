@@ -147,8 +147,12 @@ class FlowRuntimeEnv(Protocol):
         self, prefix: str, doc_tags: dict[str, Any], *, item_id: str | None = None,
     ) -> str | None: ...
     def gather_context(self, item_id: str, tags: dict[str, Any]) -> str: ...
-    def gather_analyze_chunks(self, item_id: str, item: Any) -> Any: ...
+    def gather_analyze_chunks(
+        self, item_id: str, item: Any, *, since_version: int | None = None,
+    ) -> Any: ...
     def gather_guide_context(self, tags: list[str]) -> str: ...
+    def load_prompt_doc(self, doc_id: str, *, required: bool = False) -> str | None: ...
+    def max_part_num(self, item_id: str) -> int: ...
 
     def get_default_summarization_provider(self) -> Any: ...
     def get_default_analyzer_provider(self) -> Any: ...
@@ -619,11 +623,24 @@ class LocalFlowEnvironment:
     def gather_context(self, item_id: str, tags: dict[str, Any]) -> str:
         return self._keeper._gather_context(item_id, tags)
 
-    def gather_analyze_chunks(self, item_id: str, item: Any) -> Any:
-        return self._keeper._gather_analyze_chunks(item_id, item)
+    def gather_analyze_chunks(
+        self, item_id: str, item: Any, *, since_version: int | None = None,
+    ) -> Any:
+        return self._keeper._gather_analyze_chunks(
+            item_id, item, since_version=since_version,
+        )
 
     def gather_guide_context(self, tags: list[str]) -> str:
         return self._keeper._gather_guide_context(tags)
+
+    def load_prompt_doc(self, doc_id: str, *, required: bool = False) -> str | None:
+        """Load a prompt doc by exact ID and return its ``## Prompt`` section."""
+        return self._keeper._load_prompt_doc(doc_id, required=required)
+
+    def max_part_num(self, item_id: str) -> int:
+        """Highest existing part number for *item_id* (0 if none)."""
+        coll = self._keeper._resolve_doc_collection()
+        return self._keeper._document_store.max_part_num(coll, item_id) or 0
 
     def resolve_prompt(
         self, prefix: str, doc_tags: dict[str, Any],

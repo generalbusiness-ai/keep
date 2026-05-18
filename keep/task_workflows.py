@@ -251,11 +251,25 @@ class _KeeperActionContext:
     def gather_context(self, item_id: str, tags: dict[str, Any]) -> str:
         return self._keeper._gather_context(item_id, tags)
 
-    def gather_analyze_chunks(self, item_id: str, item: Any) -> Any:
-        return self._keeper._gather_analyze_chunks(item_id, item)
+    def gather_analyze_chunks(
+        self, item_id: str, item: Any, *, since_version: int | None = None,
+    ) -> Any:
+        return self._keeper._gather_analyze_chunks(
+            item_id, item, since_version=since_version,
+        )
 
     def gather_guide_context(self, tags: list[str]) -> str:
         return self._keeper._gather_guide_context(tags)
+
+    def load_prompt_doc(self, doc_id: str, *, required: bool = False) -> str | None:
+        """Load a prompt doc by exact ID and return its ``## Prompt`` section."""
+        return self._keeper._load_prompt_doc(doc_id, required=required)
+
+    def max_part_num(self, item_id: str) -> int:
+        """Highest existing part number for *item_id* (0 if none)."""
+        return self._keeper._document_store.max_part_num(
+            self._collection, item_id,
+        ) or 0
 
     def resolve_provider(self, kind: str, name: str | None = None) -> Any:
         _PROVIDER_MAP = {
