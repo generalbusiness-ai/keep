@@ -1,7 +1,7 @@
 """Remote Keeper — HTTP client for a flow-hosted keep backend.
 
 Used by the CLI to talk to the local daemon, and by the hosted
-keepnotes.ai service. The stable interface is ``run_flow()``; higher-
+keep.generalbusiness.ai service. The stable interface is ``run_flow()``; higher-
 level helpers delegate through the shared flow client layer.
 """
 

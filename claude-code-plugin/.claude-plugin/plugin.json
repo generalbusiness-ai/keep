@@ -3,10 +3,10 @@
   "version": "0.151.0",
   "description": "Reflective memory with semantic search for AI agents",
   "author": {
-    "name": "keepnotes-ai",
-    "url": "https://github.com/keepnotes-ai"
+    "name": "generalbusiness-ai",
+    "url": "https://github.com/generalbusiness-ai"
   },
-  "repository": "https://github.com/keepnotes-ai/keep",
+  "repository": "https://github.com/generalbusiness-ai/keep",
   "license": "MIT",
   "keywords": ["memory", "reflective", "semantic-search", "context", "reflection"]
 }

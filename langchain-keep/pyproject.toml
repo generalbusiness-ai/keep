@@ -21,6 +21,6 @@ classifiers = [
 dependencies = ["keep-skill[langchain]>=0.44.0"]
 
 [project.urls]
-Homepage = "https://keepnotes.ai"
-Repository = "https://github.com/keepnotes-ai/keep"
-Documentation = "https://docs.keepnotes.ai"
+Homepage = "https://keep.generalbusiness.ai"
+Repository = "https://github.com/generalbusiness-ai/keep"
+Documentation = "https://docs.generalbusiness.ai"

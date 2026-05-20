@@ -1,6 +1,6 @@
 # langchain-keep
 
-LangChain integration for [keep](https://github.com/keepnotes-ai/keep) — reflective memory for AI agents.
+LangChain integration for [keep](https://github.com/generalbusiness-ai/keep) — reflective memory for AI agents.
 
 This is a convenience package that installs `keep-skill[langchain]` and re-exports the integration components.
 
@@ -47,13 +47,13 @@ export OPENAI_API_KEY=...    # or GEMINI_API_KEY
 Or use the hosted service:
 
 ```bash
-export KEEPNOTES_API_KEY=... # Sign up at https://keepnotes.ai
+export KEEPNOTES_API_KEY=... # Sign up at https://keep.generalbusiness.ai
 ```
 
-See the [full documentation](https://docs.keepnotes.ai) for all provider options.
+See the [full documentation](https://docs.generalbusiness.ai) for all provider options.
 
 ## Links
 
-- [Documentation](https://docs.keepnotes.ai)
-- [GitHub](https://github.com/keepnotes-ai/keep)
+- [Documentation](https://docs.generalbusiness.ai)
+- [GitHub](https://github.com/generalbusiness-ai/keep)
 - [keep on PyPI](https://pypi.org/project/keep-skill/)

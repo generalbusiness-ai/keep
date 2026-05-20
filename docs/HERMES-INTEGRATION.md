@@ -7,7 +7,7 @@ If you have Ollama running locally, it will be auto-detected. For other provider
 ## Install
 
 ```bash
-curl -sSL https://keepnotes.ai/scripts/install-hermes.sh | bash
+curl -sSL https://keep.generalbusiness.ai/scripts/install-hermes.sh | bash
 ```
 
 This finds your Hermes installation, installs the plugin, and runs the setup wizard. Choose your embedding and summarization providers when prompted.

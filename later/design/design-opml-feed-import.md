@@ -204,8 +204,8 @@ Normalized feed description, for example:
 ```md
 # Keep Blog
 
-- feed: https://keepnotes.ai/blog/feed.xml
-- site: https://keepnotes.ai/blog/
+- feed: https://generalbusiness.ai/blog/feed.xml
+- site: https://generalbusiness.ai/blog/
 - groups: AI
 
 Recent entries:

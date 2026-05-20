@@ -47,7 +47,7 @@ User-facing terminology:
 
 ## Release process
 
-- Feature work should be on its own branch.
+- Feature work should be on its own worktree/branch.
 - Do not commit to main, tag, push, or release without explicit user instruction.
 - Major version is zero.  Minor version is updated with feature releases.  Patch version for maintenance.
 - Before any release: if recent work was implementing a written design doc (`later/design/`), ensure that doc reflects the current status.

@@ -16,6 +16,6 @@ Once the extension is installed, just say to Claude:
 
 ## More information
 
-- [Online guides](https://docs.keepnotes.ai/guides/)
+- [Online guides](https://docs.generalbusiness.ai/guides/)
 - [MCP tools reference](KEEP-MCP.md)
 - [Quick Start](QUICKSTART.md)

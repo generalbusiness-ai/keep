@@ -1,15 +1,15 @@
 {
-  "name": "@keepnotes-ai/keep",
+  "name": "@generalbusiness-ai/keep",
   "version": "0.151.0",
   "description": "keep — reflective memory plugin for OpenClaw (context engine + memory tools)",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/keepnotes-ai/keep.git",
+    "url": "https://github.com/generalbusiness-ai/keep.git",
     "directory": "keep/data/openclaw-plugin"
   },
-  "homepage": "https://github.com/keepnotes-ai/keep",
+  "homepage": "https://github.com/generalbusiness-ai/keep",
   "keywords": ["openclaw", "plugin", "memory", "keep", "reflective-memory", "context-engine"],
   "openclaw": {
     "extensions": ["./dist/index.js"]

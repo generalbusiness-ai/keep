@@ -2,7 +2,7 @@
 name: keep
 version: 0.151.0
 description: Reflective Memory
-homepage: https://github.com/keepnotes-ai/keep
+homepage: https://github.com/generalbusiness-ai/keep
 runtime: python:3.12-slim
 user-invocable: true
 metadata: {"openclaw":{"emoji":"🪞","requires":{"bins":["uv"],"anyBins":["python","python3"]},"install":[{"id":"uv","kind":"uv","package":"keep-skill[local]","bins":["keep"],"label":"Install keep with local models"}]}}
@@ -148,7 +148,7 @@ keep_flow(state="query-resolve", params={query: "auth", bias: {now: 0}, since: "
 
 ## Layer 2: First Time Setup
 
-The store auto-initializes on first use. For provider configuration, see [docs/QUICKSTART.md](docs/QUICKSTART.md). Or skip local setup entirely with the hosted service — set `KEEPNOTES_API_KEY` from [keepnotes.ai](https://keepnotes.ai).
+The store auto-initializes on first use. For provider configuration, see [docs/QUICKSTART.md](docs/QUICKSTART.md). Or skip local setup entirely with the hosted service — set `KEEPNOTES_API_KEY` from [keep.generalbusiness.ai](https://keep.generalbusiness.ai).
 
 Now *read* the foundational teachings. These are seed wisdom, not test fixtures. They are already installed as bundled `.library/*` notes — you don't need to ingest them yourself.
 

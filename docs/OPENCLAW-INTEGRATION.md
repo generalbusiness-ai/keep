@@ -6,7 +6,7 @@ OpenClaw writes memory files (markdown) which are a solid foundation for
 long-term memory. But flat files aren't enough to reliably recall what's
 happening, what needs follow-up, or to build a continuous improvement loop.
 
-[Keep](https://github.com/keepnotes-ai/keep) integrates with OpenClaw as a
+[Keep](https://github.com/generalbusiness-ai/keep) integrates with OpenClaw as a
 **context engine** — it owns how context is captured, assembled, and enriched
 across the agent's lifecycle.
 

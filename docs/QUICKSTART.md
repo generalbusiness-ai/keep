@@ -14,7 +14,7 @@ Then run `keep` — it walks you through first-time setup: choosing embedding an
 keep
 ```
 
-If [Ollama](https://ollama.com/) is running, it's offered as the default — no API keys needed. Otherwise choose from any detected provider (OpenAI, OpenRouter, Voyage, Gemini, etc.) or use the [hosted service](https://keepnotes.ai):
+If [Ollama](https://ollama.com/) is running, it's offered as the default — no API keys needed. Otherwise choose from any detected provider (OpenAI, OpenRouter, Voyage, Gemini, etc.) or use the [hosted service](https://keep.generalbusiness.ai):
 
 ```bash
 export KEEPNOTES_API_KEY=kn_...
@@ -90,11 +90,11 @@ The budget meeting? Not returned. Because it's not relevant. Semantic search doe
 Notes are great for quick facts. But you also have documents — policies, specs, PDFs, web pages.
 
 ```bash
-keep put https://docs.keepnotes.ai/samples/travel-policy.pdf
+keep put https://docs.generalbusiness.ai/samples/travel-policy.pdf
 ```
 
 ```
-https://docs.keepnotes.ai/samples/travel-policy.pdf 2026-02-22 Corporate travel policy covering flight booking procedures, hotel guidelines, meal per-diems, and expense reporting requirements.
+https://docs.generalbusiness.ai/samples/travel-policy.pdf 2026-02-22 Corporate travel policy covering flight booking procedures, hotel guidelines, meal per-diems, and expense reporting requirements.
 ```
 
 The URL becomes the note ID. The PDF is fetched, text-extracted, summarized, and embedded. Re-indexing the same URL creates a new version automatically.
@@ -244,7 +244,7 @@ On first use, `keep` detects coding tools and installs hooks into their configur
 
 | Tool | What happens |
 |------|-------------|
-| **Claude Code** | Plugin: `/plugin marketplace add https://github.com/keepnotes-ai/keep.git` then `/plugin install keep@keepnotes-ai` |
+| **Claude Code** | Plugin: `/plugin marketplace add https://github.com/generalbusiness-ai/keep.git` then `/plugin install keep@generalbusiness-ai` |
 | **VS Code Copilot** | MCP: `export KEEP_STORE_PATH=...` then `code --add-mcp "{\"name\":\"keep\",\"command\":\"keep\",\"args\":[\"--store\",\"$KEEP_STORE_PATH\",\"mcp\"]}"` |
 | **Kiro** | Practice prompt + agent hooks. MCP: `export KEEP_STORE_PATH=...` then `kiro-cli mcp add --name keep --scope global -- keep --store "$KEEP_STORE_PATH" mcp` |
 | **OpenAI Codex** | Practice prompt in `AGENTS.md`. MCP: `export KEEP_STORE_PATH=...` then `codex mcp add keep -- keep --store "$KEEP_STORE_PATH" mcp` |

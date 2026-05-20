@@ -67,10 +67,10 @@ def generate_manifest(keep_path: Optional[str] = None) -> dict:
         "author": {"name": "Hugh Pyle, inguz \u16dc outcomes llc"},
         "repository": {
             "type": "git",
-            "url": "https://github.com/keepnotes-ai/keep.git",
+            "url": "https://github.com/generalbusiness-ai/keep.git",
         },
-        "homepage": "https://github.com/keepnotes-ai/keep",
-        "documentation": "https://docs.keepnotes.ai/guides/",
+        "homepage": "https://github.com/generalbusiness-ai/keep",
+        "documentation": "https://docs.generalbusiness.ai/guides/",
         "license": "MIT",
         "keywords": ["memory", "reflection", "semantic-search", "context"],
         "icon": "icon.png",

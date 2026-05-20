@@ -28,7 +28,7 @@ Results are from a single run (not averaged over multiple runs).
 
 keep's embedding and summarization providers (and their prompts) are user-configurable.
 This benchmark used local Ollama models, but keep also supports OpenAI, Anthropic,
-and other API providers, as well as the [keepnotes.ai](https://keepnotes.ai)
+and other API providers, as well as the [keep.generalbusiness.ai](https://keep.generalbusiness.ai)
 hosted service.
 
 ### Comparison with published results

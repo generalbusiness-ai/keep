@@ -33,7 +33,7 @@ def user_agent() -> str:
         ver = version("keep-skill")
     except Exception:
         ver = "dev"
-    return f"keepnotes-ai/keep {ver}"
+    return f"generalbusiness-ai/keep {ver}"
 
 
 def utc_now() -> str:

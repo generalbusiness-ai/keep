@@ -3,7 +3,7 @@ tags:
   category: system
   kind: teaching
   topic: awareness
-  source_url: https://raw.githubusercontent.com/keepnotes-ai/keep/refs/heads/main/docs/library/true_person_no_rank.md
+  source_url: https://raw.githubusercontent.com/generalbusiness-ai/keep/refs/heads/main/docs/library/true_person_no_rank.md
 ---
 # The True Person of No Rank (無位真人)
 

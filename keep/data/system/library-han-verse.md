@@ -3,7 +3,7 @@ tags:
   category: system
   kind: teaching
   topic: urgency
-  source_url: https://raw.githubusercontent.com/keepnotes-ai/keep/refs/heads/main/docs/library/han_verse.txt
+  source_url: https://raw.githubusercontent.com/generalbusiness-ai/keep/refs/heads/main/docs/library/han_verse.txt
 ---
 # Han Verse (版の偈)
 

@@ -103,7 +103,7 @@ Keep needs an embedding provider (for search) and a summarization provider (for 
 
 ### Hosted Service
 
-Sign up at [keepnotes.ai](https://keepnotes.ai) to get an API key — no local models, no database setup:
+Sign up at [keep.generalbusiness.ai](https://keep.generalbusiness.ai) to get an API key — no local models, no database setup:
 
 ```bash
 export KEEPNOTES_API_KEY=kn_...
@@ -313,7 +313,7 @@ VOYAGE_API_KEY=pa-...                # For Voyage embeddings only
 ANTHROPIC_API_KEY=sk-ant-...         # For Anthropic summarization only
 MISTRAL_API_KEY=...                  # For Mistral (embeddings + summarization + OCR)
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...  # OAuth token alternative
-KEEPNOTES_API_KEY=kn_...             # For hosted keepnotes.ai service
+KEEPNOTES_API_KEY=kn_...             # For hosted keep.generalbusiness.ai service
 ```
 
 ## Data security

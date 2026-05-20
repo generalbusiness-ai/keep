@@ -44,7 +44,7 @@ class KeeperProtocol(FlowHostProtocol, Protocol):
 
     Implemented by:
     - Keeper (local backend)
-    - RemoteKeeper (hosted keepnotes.ai API)
+    - RemoteKeeper (hosted keep.generalbusiness.ai API)
     """
 
     # -- Write operations --

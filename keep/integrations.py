@@ -56,8 +56,8 @@ keep_help(topic="flow-actions")                                                 
 HOOKS_VERSION = 13
 
 # Claude Code plugin marketplace URL
-CLAUDE_CODE_MARKETPLACE_URL = "https://github.com/keepnotes-ai/keep.git"
-CLAUDE_CODE_MARKETPLACE_NAME = "keepnotes-ai"
+CLAUDE_CODE_MARKETPLACE_URL = "https://github.com/generalbusiness-ai/keep.git"
+CLAUDE_CODE_MARKETPLACE_NAME = "generalbusiness-ai"
 CLAUDE_CODE_PLUGIN_NAME = "keep"
 
 # Hook definitions for Claude Code

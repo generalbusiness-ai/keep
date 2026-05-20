@@ -209,4 +209,4 @@ gh release create "$TAG" \
 echo ""
 echo "=== Released $TAG ==="
 echo "  PyPI: https://pypi.org/project/keep-skill/$NEW_VERSION/"
-echo "  GitHub: https://github.com/keepnotes-ai/keep/releases/tag/$TAG"
+echo "  GitHub: https://github.com/generalbusiness-ai/keep/releases/tag/$TAG"

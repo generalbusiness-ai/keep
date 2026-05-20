@@ -32,7 +32,7 @@ def _repo_name(repo_dir: Path) -> str:
     when available, otherwise falls back to the absolute directory path.
 
     Examples:
-        github.com/keepnotes-ai/keep   (from https://github.com/keepnotes-ai/keep.git)
+        github.com/generalbusiness-ai/keep   (from https://github.com/generalbusiness-ai/keep.git)
         /Users/hugh/play/local-project  (no remote)
     """
     # Try origin remote URL first

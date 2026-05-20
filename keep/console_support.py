@@ -746,7 +746,7 @@ No embedding provider configured.
 To use keep, configure a provider:
 
   Hosted (simplest — no local setup):
-    export KEEPNOTES_API_KEY=...   # Sign up at https://keepnotes.ai
+    export KEEPNOTES_API_KEY=...   # Sign up at https://keep.generalbusiness.ai
 
   API-based:
     export VOYAGE_API_KEY=...      # Get at dash.voyageai.com
@@ -755,7 +755,7 @@ To use keep, configure a provider:
   Local (macOS Apple Silicon):
     pip install 'keep-skill[local]'
 
-See: https://github.com/keepnotes-ai/keep#installation
+See: https://github.com/generalbusiness-ai/keep#installation
 """
 
 

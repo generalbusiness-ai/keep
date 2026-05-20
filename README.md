@@ -2,7 +2,7 @@
 
 Agent memory that pays attention.  The foundation of skillful action.
 
-It includes [skill instructions](SKILL.md) for reflective practice, and a powerful semantic memory system with [command-line](docs/QUICKSTART.md) and [MCP](docs/KEEP-MCP.md) interfaces. Fully local, or use API keys for model providers, or [cloud-hosted](https://keepnotes.ai) for multi-agent use.
+It includes [skill instructions](SKILL.md) for reflective practice, and a powerful semantic memory system with [command-line](docs/QUICKSTART.md) and [MCP](docs/KEEP-MCP.md) interfaces. Fully local, or use API keys for model providers, or [cloud-hosted](https://keep.generalbusiness.ai) for multi-agent use.
 
 ```bash
 uv tool install keep-skill       # or: pip install keep-skill
@@ -49,7 +49,7 @@ This is more than a vector store: selected tags become **edges**. A tag becomes 
 - **Watches** — Daemon-driven directory and file monitoring; re-indexes on change
 - **Works offline** — Local models (MLX, Ollama, etc.), or API providers (Voyage, OpenAI, Gemini, Anthropic, Mistral)
 
-> **[keepnotes.ai](https://keepnotes.ai)** — Hosted service. No local setup, no API keys to manage. Same SDK, managed infrastructure.
+> **[keep.generalbusiness.ai](https://keep.generalbusiness.ai)** — Hosted service. No local setup, no API keys to manage. Same SDK, managed infrastructure.
 
 ### The Practice
 
@@ -57,7 +57,7 @@ keep is designed as a skill for AI agents — a practice, not just a tool. The [
 
 This works because the tool and the skill reinforce each other. The tool stores and retrieves; the skill says *when* and *why*. An agent that uses both develops *skillful action* across sessions — not just recall, but looking before acting, and a deep review of outcomes afterwards.
 
-> Why build memory for AI agents? What does "reflective practice" mean here? **[Read our blog for the back-story →](https://keepnotes.ai/blog/)**
+> Why build memory for AI agents? What does "reflective practice" mean here? **[Read our blog for the back-story →](https://generalbusiness.ai/blog/)**
 
 ### Integration
 
@@ -65,10 +65,10 @@ Run `keep` (or `keep config --setup`) and the interactive wizard offers to insta
 
 | Tool | How to install |
 |------|-------------|
-| **[Hermes Agent](docs/HERMES-INTEGRATION.md)** | `curl -sSL https://keepnotes.ai/scripts/install-hermes.sh \| bash` — installs plugin and runs setup. Fully integrated, with [additional skills](https://github.com/keepnotes-ai/hermes-skills) available. |
+| **[Hermes Agent](docs/HERMES-INTEGRATION.md)** | `curl -sSL https://keep.generalbusiness.ai/scripts/install-hermes.sh \| bash` — installs plugin and runs setup. Fully integrated, with [additional skills](https://github.com/generalbusiness-ai/hermes-skills) available. |
 | **[OpenClaw](docs/OPENCLAW-INTEGRATION.md)** | `openclaw plugins install clawhub:keep` (or `-l $(keep config openclaw-plugin)` from a local checkout). After that, `keep config --setup` keeps the plugin upgraded. Context engine plugin — full memory assembly, session archival, reflection triggers. |
 | **Claude Desktop** | `keep config --setup`, then `keep config mcpb` to generate and open the .mcpb bundle ([details](docs/CLAUDE-DESKTOP.md)) |
-| **Claude Code** | `/plugin marketplace add https://github.com/keepnotes-ai/keep.git` then `/plugin install keep@keepnotes-ai` |
+| **Claude Code** | `/plugin marketplace add https://github.com/generalbusiness-ai/keep.git` then `/plugin install keep@generalbusiness-ai` |
 | **VS Code Copilot** | `export KEEP_STORE_PATH=...` then `code --add-mcp "{\"name\":\"keep\",\"command\":\"keep\",\"args\":[\"--store\",\"$KEEP_STORE_PATH\",\"mcp\"]}"` |
 | **GitHub Copilot CLI** | Auto-installed by `keep config --setup` when `~/.copilot/` is present. |
 | **Kiro** | `export KEEP_STORE_PATH=...` then `kiro-cli mcp add --name keep --scope global -- keep --store "$KEEP_STORE_PATH" mcp` |
@@ -98,7 +98,7 @@ The first run launches an interactive wizard: it picks up any API keys you have 
 **Skip the wizard** by setting one of:
 
 ```bash
-export KEEPNOTES_API_KEY=kn_...    # Hosted at https://keepnotes.ai — no local setup needed
+export KEEPNOTES_API_KEY=kn_...    # Hosted at https://keep.generalbusiness.ai — no local setup needed
 export OPENAI_API_KEY=...          # Or GEMINI_API_KEY, OPENROUTER_API_KEY — each does both embeddings + summarization
 export VOYAGE_API_KEY=...          # Or MISTRAL_API_KEY — embeddings only; pair with ANTHROPIC_API_KEY etc. for summarization
 export GOOGLE_CLOUD_PROJECT=...    # Vertex AI via Workload Identity / ADC
@@ -171,7 +171,7 @@ See [docs/QUICKSTART.md](docs/QUICKSTART.md) for configuration and more examples
 
 ## Documentation
 
-Full docs at **[docs.keepnotes.ai](https://docs.keepnotes.ai)** — or browse locally:
+Full docs at **[docs.generalbusiness.ai](https://docs.generalbusiness.ai)** — or browse locally:
 
 - **[docs/QUICKSTART.md](docs/QUICKSTART.md)** — Setup, configuration, first steps
 - **[docs/REFERENCE.md](docs/REFERENCE.md)** — Quick reference index

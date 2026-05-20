@@ -62,9 +62,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://keepnotes.ai"
-Documentation = "https://docs.keepnotes.ai/guides/"
-Repository = "https://github.com/keepnotes-ai/keep"
+Homepage = "https://keep.generalbusiness.ai"
+Documentation = "https://docs.generalbusiness.ai/guides/"
+Repository = "https://github.com/generalbusiness-ai/keep"
 
 [project.optional-dependencies]
 # Local models (macOS Apple Silicon optimized, ~500MB with PyTorch)

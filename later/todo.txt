@@ -294,7 +294,7 @@ x `context` text alongside summaries? (no, summary is good now)
 . constrained tags: sub-doc validation at .tag/KEY/VALUE, fail on invalid values, casefold on write
 . semantic part decomposition: `keep analyze`, @P{N} syntax, --analyze flag on put, linked parts with independent tags
 . multi-file/directory put: `keep put /path/to/dir` recurses and indexes
-. pypi Documentation URL → https://docs.keepnotes.ai/guides/
+. pypi Documentation URL → https://docs.generalbusiness.ai/guides/
 . interface refactor: unified remember()+update() into put(content, uri, id, summary, tags)
 . interface refactor: unified find()+find_similar()+query_fulltext() into find(query, similar_to, fulltext, ...)
 . security: error log 0o600 permissions via os.open(), binary stdin handling in put/now, tag validation on all put() paths
