@@ -1188,7 +1188,7 @@ wheels = [
 
 [[package]]
 name = "keep-skill"
-version = "0.152.0"
+version = "0.153.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
