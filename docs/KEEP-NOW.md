@@ -19,6 +19,35 @@ echo "piped content" | keep now       # Set from stdin
 |--------|-------------|
 | `-t`, `--tag KEY=VALUE` | Set tag on the update (repeatable) |
 | `--truncate` | Truncate content to `max_inline_length` instead of failing |
+| `--scope NAME` | Write to a per-workstream version chain (doc id `now:NAME`) |
+| `--auto-scope` | Derive `--scope` from the cwd (git `project/branch`, else cwd basename) |
+| `-q`, `--quiet` | Suppress the trailing context dump on stdout |
+
+## Per-workstream scope
+
+When several agent sessions run in parallel — different worktrees, different
+branches, different projects — they all clobber a single global `now`.
+`--auto-scope` routes each session's writes to its own chain:
+
+```bash
+keep now "..." --auto-scope     # in ~/play/myproj on branch feature-x
+                                # → writes to doc id `now:myproj/feature-x`
+keep now --auto-scope           # shows that scoped chain
+```
+
+Slug derivation:
+
+- In a git repo: `{project}/{branch}` where `project` is the basename of the
+  main repo (worktrees inherit the main project's name).
+- Detached HEAD: `{project}/{worktree-basename}`.
+- Outside any git repo: cwd basename.
+
+Pass `--scope NAME` to override the derived slug with an explicit name.
+
+The plugin hooks shipped with keep use `--auto-scope` so each Claude Code or
+Codex session gets its own chain automatically. Stop-event hooks add
+`--quiet` so the formatted context dump doesn't leak onto stdout (which the
+host parses as JSON).
 
 ## Version history
 

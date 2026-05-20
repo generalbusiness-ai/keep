@@ -54,6 +54,7 @@ from .markdown_mirrors import run_markdown_export_once
 from .paths import get_config_dir, get_default_store_path
 from .setup_wizard import run_wizard
 from .utils import _list_directory_files
+from .workstream import derive_workstream_slug
 
 _ExportCollisionError = _markdown_export._ExportCollisionError
 _MAX_FILENAME_BYTES = _markdown_export._MAX_FILENAME_BYTES
@@ -266,9 +267,28 @@ def _emit_context(data: dict, json_output: bool) -> None:
         typer.echo(_render_context(data))
 
 
-def _show_now(port: int, json_output: bool) -> None:
-    data = _get(port, f"/v1/notes/{_q('now')}/context")
+def _show_now(port: int, json_output: bool, doc_id: str = "now") -> None:
+    data = _get(port, f"/v1/notes/{_q(doc_id)}/context")
     _emit_context(data, json_output)
+
+
+def _resolve_now_scope(scope: Optional[str], auto_scope: bool) -> Optional[str]:
+    """Resolve a ``--scope`` / ``--auto-scope`` pair to a concrete slug.
+
+    Explicit ``--scope`` always wins. ``--auto-scope`` derives the slug from
+    the cwd via :func:`keep.workstream.derive_workstream_slug` so plugin
+    hooks can stay shell-simple.
+    """
+    if scope:
+        return scope
+    if auto_scope:
+        return derive_workstream_slug()
+    return None
+
+
+def _now_doc_id(scope: Optional[str]) -> str:
+    """``now`` when unscoped, ``now:{scope}`` otherwise — matches flow_client."""
+    return f"now:{scope}" if scope else "now"
 
 
 def _should_use_now_put_path(
@@ -1347,6 +1367,9 @@ def now(
     content: Annotated[Optional[str], typer.Argument(help="New content")] = None,
     tags: Annotated[Optional[list[str]], typer.Option("-t", "--tag", help="Tags")] = None,
     truncate_flag: Annotated[bool, typer.Option("--truncate", help="Truncate content to max_inline_length instead of failing")] = False,
+    scope: Annotated[Optional[str], typer.Option("--scope", help="Workstream scope name; writes to 'now:{scope}' instead of bare 'now'")] = None,
+    auto_scope: Annotated[bool, typer.Option("--auto-scope", help="Derive scope from cwd (git project+branch, else cwd basename)")] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Suppress the trailing context dump on stdout (use in Stop hooks)")] = False,
     json_output: JsonFlag = False,
 ):
     """Get or set the current working intentions.
@@ -1354,12 +1377,19 @@ def now(
     \b
     With no arguments, displays the current intentions.
     With content, replaces them (previous version is preserved).
+
+    \b
+    --scope/--auto-scope route reads and writes to a per-workstream version
+    chain (doc id ``now:{scope}``). Lets parallel sessions stop clobbering
+    one shared ``now``.
     """
     # Expand ${.field} templates from stdin JSON (hook support)
     (content,) = _expand_stdin_templates(content)
     tags = _expand_stdin_tag_list(tags)
 
     port = _get_port()
+    resolved_scope = _resolve_now_scope(scope, auto_scope)
+    doc_id = _now_doc_id(resolved_scope)
     if content:
         if truncate_flag:
             config_dir = _config_dir_for_store()
@@ -1367,8 +1397,14 @@ def now(
             if len(content) > cfg.max_inline_length:
                 content = content[:cfg.max_inline_length]
         parsed_tags, _ = _parse_tag_args(tags)
-        _post(port, "/v1/notes", {"content": content, "id": "now", "tags": parsed_tags or None})
-    _show_now(port, json_output)
+        # Mirror flow_client.set_now_item: a scoped now also carries a
+        # ``user`` tag so downstream queries can find sibling chains.
+        if resolved_scope:
+            parsed_tags = parsed_tags or {}
+            parsed_tags.setdefault("user", resolved_scope)
+        _post(port, "/v1/notes", {"content": content, "id": doc_id, "tags": parsed_tags or None})
+    if not quiet:
+        _show_now(port, json_output, doc_id=doc_id)
 
 
 @app.command("list")
@@ -1454,6 +1490,7 @@ def prompt(
     until: Annotated[Optional[str], typer.Option("--until", help="Updated before")] = None,
     deep: Annotated[bool, typer.Option("--deep", "-D", help="Follow tags to discover related items")] = False,
     scope: Annotated[Optional[str], typer.Option("--scope", "-S", help="ID glob scope")] = None,
+    auto_scope: Annotated[bool, typer.Option("--auto-scope", help="When --id is unset, default it to the workstream-scoped 'now' derived from cwd")] = False,
     token_budget: Annotated[Optional[int], typer.Option("--tokens", help="Token budget for {find}")] = None,
     json_output: JsonFlag = False,
 ):
@@ -1473,6 +1510,12 @@ def prompt(
     """
     # Expand ${.field} templates from stdin JSON (hook support)
     tag = _expand_stdin_tag_list(tag)
+
+    # --auto-scope is a per-workstream override of the {get} target. Only
+    # apply it when --id wasn't specified explicitly, so an explicit --id
+    # always wins.
+    if auto_scope and not id:
+        id = _now_doc_id(_resolve_now_scope(None, True))
 
     port = _get_port()
 
