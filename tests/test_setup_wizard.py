@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -220,6 +221,295 @@ class TestRunWizardNonInteractive:
             config = run_wizard(tmp_path)
         assert config is not None
         assert (tmp_path / "keep.toml").exists()
+
+    def test_non_interactive_remote_runs_content_verification(
+        self, tmp_path, monkeypatch,
+    ):
+        """Smoke/non-TTY setup must verify hosted credentials end-to-end."""
+        monkeypatch.setattr("keep.setup_wizard._is_interactive", lambda: False)
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+        monkeypatch.setenv("KEEPNOTES_API_URL", "https://api.example.test")
+        monkeypatch.setenv("KEEPNOTES_PROJECT", "alpha")
+
+        with (
+            patch(
+                "keep.setup_wizard._verify_remote",
+                return_value=(True, "content round trip OK"),
+            ) as verify,
+            patch("keep.setup_wizard.detect_tool_choices") as detect_tools,
+            patch("keep.setup_wizard.stop_daemon"),
+        ):
+            config = run_wizard(tmp_path)
+
+        verify.assert_called_once()
+        remote = verify.call_args.args[0]
+        assert remote.api_url == "https://api.example.test"
+        assert remote.api_key == "kn_test"
+        assert remote.project == "alpha"
+        detect_tools.assert_not_called()
+        assert config.remote is None  # env credentials are not persisted
+        assert "[remote]" not in (tmp_path / "keep.toml").read_text(encoding="utf-8")
+
+    def test_non_interactive_remote_failure_does_not_write(
+        self, tmp_path, monkeypatch,
+    ):
+        """Broken remote credentials abort setup before keep.toml is written."""
+        monkeypatch.setattr("keep.setup_wizard._is_interactive", lambda: False)
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+
+        with (
+            patch(
+                "keep.setup_wizard._verify_remote",
+                return_value=(False, "content round trip failed: request_id=rid"),
+            ),
+            patch("keep.setup_wizard.save_config") as save_config,
+        ):
+            with pytest.raises(SystemExit) as exc:
+                run_wizard(tmp_path)
+
+        assert exc.value.code == 1
+        save_config.assert_not_called()
+        assert not (tmp_path / "keep.toml").exists()
+
+
+class TestRemoteShortCircuit:
+    """Wizard short-circuits embedding/summarization prompts when remote is set."""
+
+    @pytest.fixture
+    def _clean_env(self, monkeypatch):
+        for var in ("KEEPNOTES_API_URL", "KEEPNOTES_API_KEY", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_verify_remote_requires_content_round_trip(self, monkeypatch):
+        """Remote verification writes, reads, lists, and deletes a probe note."""
+        from keep.config import RemoteConfig
+        from keep.setup_wizard import _verify_remote
+
+        class FakeRemoteKeeper:
+            instances = []
+
+            def __init__(self, api_url, api_key, config, *, project=None):
+                self.api_url = api_url
+                self.api_key = api_key
+                self.config = config
+                self.project = project
+                self.calls = []
+                self.item = None
+                FakeRemoteKeeper.instances.append(self)
+
+            def server_info(self):
+                raise AssertionError("readiness-only checks are insufficient")
+
+            def put(self, *, content, id, tags):
+                self.calls.append(("put", id, content, tags))
+                self.item = SimpleNamespace(id=id, summary=content, tags=tags)
+                return self.item
+
+            def get(self, id):
+                self.calls.append(("get", id))
+                return self.item if self.item and self.item.id == id else None
+
+            def find(self, *, tags, limit):
+                self.calls.append(("find", tags, limit))
+                return [self.item] if self.item and self.item.tags == tags else []
+
+            def delete(self, id):
+                self.calls.append(("delete", id))
+                return True
+
+            def close(self):
+                self.calls.append(("close",))
+
+        monkeypatch.setattr("keep.remote.RemoteKeeper", FakeRemoteKeeper)
+
+        ok, message = _verify_remote(
+            RemoteConfig(
+                api_url="https://api.example.test",
+                api_key="kn_test",
+                project="alpha",
+            )
+        )
+
+        assert ok is True
+        assert message == "content round trip OK"
+
+        instance = FakeRemoteKeeper.instances[0]
+        assert instance.api_url == "https://api.example.test"
+        assert instance.api_key == "kn_test"
+        assert instance.project == "alpha"
+        assert [call[0] for call in instance.calls] == [
+            "put", "get", "find", "delete", "close",
+        ]
+        put_call = instance.calls[0]
+        assert put_call[1].startswith("keep-setup-probe-")
+        assert put_call[1] in put_call[2]
+        assert put_call[3] == {"keep_setup_probe": put_call[1]}
+
+    def test_verify_remote_reports_content_probe_failure(self, monkeypatch):
+        """Write failures fail setup verification before config is persisted."""
+        from keep.config import RemoteConfig
+        from keep.setup_wizard import _verify_remote
+
+        class FailingRemoteKeeper:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.calls = []
+                FailingRemoteKeeper.instances.append(self)
+
+            def put(self, **kwargs):
+                self.calls.append(("put", kwargs))
+                raise RuntimeError("write rejected")
+
+            def delete(self, id):
+                self.calls.append(("delete", id))
+
+            def close(self):
+                self.calls.append(("close",))
+
+        monkeypatch.setattr("keep.remote.RemoteKeeper", FailingRemoteKeeper)
+
+        ok, message = _verify_remote(
+            RemoteConfig(api_url="https://api.example.test", api_key="kn_test")
+        )
+
+        assert ok is False
+        assert "content round trip failed" in message
+        assert "write rejected" in message
+        assert [call[0] for call in FailingRemoteKeeper.instances[0].calls] == [
+            "put", "close",
+        ]
+
+    def test_env_credentials_skip_provider_prompts(self, tmp_path, monkeypatch, _clean_env):
+        """KEEPNOTES_API_KEY in env triggers the remote setup path."""
+        from keep.setup_wizard import _run_interactive_setup
+
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+        monkeypatch.setenv("KEEPNOTES_API_URL", "https://api.example.test")
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+
+        with (
+            patch("keep.setup_wizard.detect_tool_choices", return_value=[]),
+            patch(
+                "keep.setup_wizard._verify_remote", return_value=(True, "reachable"),
+            ),
+            patch("keep.setup_wizard._run_provider_selection") as mock_select,
+            patch("keep.setup_wizard.stop_daemon"),
+        ):
+            config = _run_interactive_setup(
+                config_dir=config_dir,
+                store_path=None,
+                actual_store=config_dir,
+                existing=None,
+            )
+
+        mock_select.assert_not_called()  # provider prompts skipped
+        assert config.embedding is None  # remote handles embedding
+        # Env-sourced credentials are NOT written to TOML (kept in env)
+        saved = (config_dir / "keep.toml").read_text(encoding="utf-8")
+        assert "[remote]" not in saved
+
+    def test_existing_toml_credentials_skip_provider_prompts(
+        self, tmp_path, monkeypatch, _clean_env,
+    ):
+        """An existing [remote] in keep.toml triggers the remote setup path."""
+        from keep.config import RemoteConfig, StoreConfig
+        from keep.setup_wizard import _run_interactive_setup
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        existing = StoreConfig(
+            path=config_dir,
+            config_dir=config_dir,
+            embedding=None,
+            remote=RemoteConfig(
+                api_url="https://api.example.test",
+                api_key="kn_test",
+                project="alpha",
+            ),
+        )
+
+        with (
+            patch("keep.setup_wizard.detect_tool_choices", return_value=[]),
+            patch(
+                "keep.setup_wizard._verify_remote", return_value=(True, "reachable"),
+            ),
+            patch("keep.setup_wizard._run_provider_selection") as mock_select,
+            patch("keep.setup_wizard.stop_daemon"),
+        ):
+            config = _run_interactive_setup(
+                config_dir=config_dir,
+                store_path=None,
+                actual_store=config_dir,
+                existing=existing,
+            )
+
+        mock_select.assert_not_called()
+        assert config.embedding is None
+        assert config.remote is not None
+        assert config.remote.api_key == "kn_test"
+        saved = (config_dir / "keep.toml").read_text(encoding="utf-8")
+        assert "[remote]" in saved
+
+    def test_env_key_overlays_toml_api_url_in_wizard(
+        self, tmp_path, monkeypatch, _clean_env,
+    ):
+        """KEEPNOTES_API_KEY alone must merge with TOML-owned api_url/project."""
+        from keep.config import RemoteConfig, StoreConfig
+        from keep.setup_wizard import _detect_remote_config
+
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env_only")
+
+        existing = StoreConfig(
+            path=tmp_path,
+            config_dir=tmp_path,
+            embedding=None,
+            remote_persist=RemoteConfig(
+                api_url="https://config.example.test",
+                api_key="kn_file",
+                project="from-file",
+            ),
+        )
+
+        detected = _detect_remote_config(existing)
+        assert detected is not None
+        assert detected.api_url == "https://config.example.test"
+        assert detected.api_key == "kn_env_only"
+        assert detected.project == "from-file"
+
+    def test_remote_verification_failure_exits_without_writing(
+        self, tmp_path, monkeypatch, _clean_env,
+    ):
+        """Verification failure aborts setup so a broken config isn't persisted."""
+        from keep.setup_wizard import _run_interactive_setup
+
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+
+        with (
+            patch("keep.setup_wizard.detect_tool_choices", return_value=[]),
+            patch(
+                "keep.setup_wizard._verify_remote",
+                return_value=(False, "unreachable: timeout"),
+            ),
+            patch("keep.setup_wizard.stop_daemon") as mock_stop,
+            patch("keep.setup_wizard.save_config") as mock_save,
+        ):
+            with pytest.raises(SystemExit) as exc:
+                _run_interactive_setup(
+                    config_dir=config_dir,
+                    store_path=None,
+                    actual_store=config_dir,
+                    existing=None,
+                )
+
+        assert exc.value.code == 1
+        mock_save.assert_not_called()
+        mock_stop.assert_not_called()
+        assert not (config_dir / "keep.toml").exists()
 
 
 class TestInteractiveSetup:

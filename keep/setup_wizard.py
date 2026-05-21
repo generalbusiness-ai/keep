@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from .config import (
     ProviderConfig,
+    RemoteConfig,
     StoreConfig,
     _detect_ollama,
     _ollama_pick_models,
@@ -477,15 +478,6 @@ def run_wizard(
     print(f"  keep config store -> {display_path}", file=sys.stderr)
     print(file=sys.stderr)
 
-    # Non-interactive: fall back to silent config creation only.
-    # Tool integrations are never installed implicitly.
-    if not _is_interactive():
-        print("  (non-interactive mode, using auto-detected defaults)", file=sys.stderr)
-        from .config import create_default_config
-        config = create_default_config(config_dir, store_path)
-        save_config(config)
-        return config
-
     # Load existing config if re-running setup
     existing = None
     from .config import CONFIG_FILENAME
@@ -496,6 +488,28 @@ def run_wizard(
         except (FileNotFoundError, ValueError):
             pass
 
+    # Non-interactive: still run the hosted-service verification when remote
+    # credentials are present. This is the path used by production smoke tests,
+    # so it must prove real content writes work before persisting config.
+    if not _is_interactive():
+        remote_cfg = _detect_remote_config(existing)
+        if remote_cfg:
+            return _run_remote_setup(
+                config_dir=config_dir,
+                store_path=store_path,
+                actual_store=actual_store,
+                existing=existing,
+                remote=remote_cfg,
+                selected_tools=[],
+                tool_choices=[],
+            )
+
+        print("  (non-interactive mode, using auto-detected defaults)", file=sys.stderr)
+        from .config import create_default_config
+        config = create_default_config(config_dir, store_path)
+        save_config(config)
+        return config
+
     try:
         return _run_interactive_setup(config_dir, store_path, actual_store, existing)
     except KeyboardInterrupt:
@@ -504,6 +518,100 @@ def run_wizard(
         print(f"  Run `{restart_command}` again to restart setup.", file=sys.stderr)
         print(file=sys.stderr)
         raise SystemExit(130)
+
+
+def _detect_remote_config(existing: Optional[StoreConfig]) -> Optional[RemoteConfig]:
+    """Find an already-configured remote backend.
+
+    Resolution is per-field: env values override the on-disk TOML values one
+    field at a time. That way a user with only ``KEEPNOTES_API_KEY`` exported
+    still inherits ``api_url`` / ``project`` from their keep.toml.
+    """
+    env_url = os.environ.get("KEEPNOTES_API_URL")
+    env_key = os.environ.get("KEEPNOTES_API_KEY")
+    env_project = os.environ.get("KEEPNOTES_PROJECT")
+
+    # Prefer the persisted TOML view (untouched by env overlay) when present.
+    toml_remote: Optional[RemoteConfig] = None
+    if existing is not None:
+        toml_remote = getattr(existing, "remote_persist", None) or existing.remote
+
+    if not env_key and toml_remote is None:
+        return None
+
+    api_url = env_url or (toml_remote.api_url if toml_remote else None) \
+        or "https://api.keepnotes.ai"
+    api_key = env_key or (toml_remote.api_key if toml_remote else None)
+    project = env_project or (toml_remote.project if toml_remote else None)
+
+    if not api_key:
+        return None
+    return RemoteConfig(api_url=api_url, api_key=api_key, project=project or None)
+
+
+def _verify_remote(remote: RemoteConfig) -> tuple[bool, str]:
+    """Verify remote credentials with a disposable content round trip.
+
+    Returns (ok, message). ``message`` is a short status string suitable for
+    display in the wizard summary.
+    """
+    import uuid
+
+    probe_id = f"keep-setup-probe-{uuid.uuid4().hex[:12]}"
+    probe_body = (
+        f"Keep setup verification probe {probe_id}. "
+        "This note should be created, read, listed, and deleted."
+    )
+    probe_tags = {"keep_setup_probe": probe_id}
+    created = False
+
+    try:
+        from .remote import RemoteKeeper
+        # RemoteKeeper needs a StoreConfig for project fallback; an empty one
+        # is fine here because we pass project explicitly.
+        probe_cfg = StoreConfig(path=Path("/tmp"))
+        kp = RemoteKeeper(
+            remote.api_url, remote.api_key, probe_cfg, project=remote.project,
+        )
+        try:
+            stored = kp.put(content=probe_body, id=probe_id, tags=probe_tags)
+            created = True
+            if stored.id != probe_id:
+                return False, (
+                    "content round trip failed: stored unexpected id "
+                    f"{stored.id!r}"
+                )
+
+            fetched = kp.get(probe_id)
+            if fetched is None:
+                return False, "content round trip failed: probe note was not readable"
+            if fetched.id != probe_id:
+                return False, (
+                    "content round trip failed: fetched unexpected id "
+                    f"{fetched.id!r}"
+                )
+            if (
+                probe_id not in fetched.summary
+                and fetched.tags.get("keep_setup_probe") != probe_id
+            ):
+                return False, (
+                    "content round trip failed: fetched note did not match probe"
+                )
+
+            listed = kp.find(tags=probe_tags, limit=5)
+            if not any(item.id == probe_id for item in listed):
+                return False, (
+                    "content round trip failed: probe note was not listable"
+                )
+        finally:
+            try:
+                if created:
+                    kp.delete(probe_id)
+            finally:
+                kp.close()
+        return True, "content round trip OK"
+    except Exception as e:
+        return False, f"content round trip failed: {e}"
 
 
 def _run_interactive_setup(
@@ -521,6 +629,18 @@ def _run_interactive_setup(
     if any_tools_found:
         selected_tools = _run_tool_selection(tool_choices)
         print(file=sys.stderr)
+
+    # --- Remote backend short-circuit ---
+    # When KEEPNOTES_API_KEY (with optional URL) is set, or [remote] already
+    # lives in keep.toml, the hosted service performs embedding/summarization
+    # server-side. Skip the local-provider prompts entirely and verify
+    # connectivity instead so the user knows their credentials work.
+    remote_cfg = _detect_remote_config(existing)
+    if remote_cfg:
+        return _run_remote_setup(
+            config_dir, store_path, actual_store, existing,
+            remote_cfg, selected_tools, tool_choices,
+        )
 
     # --- Embedding provider ---
     current_embed = existing.embedding.name if existing and existing.embedding else None
@@ -575,7 +695,20 @@ def _run_interactive_setup(
     # Stop any running daemon so it picks up the new config on next start
     stop_daemon(config.path, force=True)
 
-    # --- Install tool integrations ---
+    installed_tools = _install_selected_tools(config, selected_tools, tool_choices)
+
+    # --- Summary ---
+    _print_summary(config, installed_tools)
+
+    return config
+
+
+def _install_selected_tools(
+    config: StoreConfig,
+    selected_tools: list[dict],
+    tool_choices: list[dict],
+) -> list[str]:
+    """Install hooks for picked tools and persist integration markers."""
     installers = {
         "claude_code": install_claude_code,
         "codex": install_codex,
@@ -584,7 +717,7 @@ def _run_interactive_setup(
         "github_copilot": install_github_copilot,
     }
 
-    installed_tools = []
+    installed_tools: list[str] = []
     for tool in selected_tools:
         installer = installers.get(tool["key"])
         if installer and tool["config_dir"]:
@@ -601,10 +734,101 @@ def _run_interactive_setup(
     if config.integrations:
         save_config(config)
 
-    # --- Summary ---
-    _print_summary(config, installed_tools)
+    return installed_tools
 
+
+def _run_remote_setup(
+    config_dir: Path,
+    store_path: Optional[Path],
+    actual_store: Path,
+    existing: Optional[StoreConfig],
+    remote: RemoteConfig,
+    selected_tools: list[dict],
+    tool_choices: list[dict],
+) -> StoreConfig:
+    """Short-circuit wizard for hosted-service configurations.
+
+    The hosted backend handles embedding and summarization server-side, so the
+    local-provider prompts are skipped. The wizard instead verifies that the
+    configured credentials reach the service.
+    """
+    source = (
+        "KEEPNOTES_API_KEY env" if os.environ.get("KEEPNOTES_API_KEY")
+        else "keep.toml [remote]"
+    )
+    print(f"  Remote backend detected ({source}):", file=sys.stderr)
+    print(f"    api_url: {remote.api_url}", file=sys.stderr)
+    if remote.project:
+        print(f"    project: {remote.project}", file=sys.stderr)
+    print(file=sys.stderr)
+    print("  Verifying credentials...", file=sys.stderr)
+    ok, message = _verify_remote(remote)
+    if not ok:
+        print(f"    FAILED — {message}", file=sys.stderr)
+        print(file=sys.stderr)
+        print(
+            "  Fix the api_url/api_key and re-run `keep config --setup`.",
+            file=sys.stderr,
+        )
+        # Bail before writing keep.toml so a broken config never lands on disk.
+        raise SystemExit(1)
+    print(f"    OK — {message}", file=sys.stderr)
+    print(file=sys.stderr)
+
+    store_path_str = None
+    if store_path and store_path.resolve() != config_dir.resolve():
+        store_path_str = str(store_path)
+
+    # Only persist [remote] in keep.toml when the credentials came from the
+    # file (or from this wizard). When the user set KEEPNOTES_* env vars we
+    # leave the file empty so the secret stays in the environment; save_config
+    # itself enforces the same rule.
+    stored_remote = remote if not os.environ.get("KEEPNOTES_API_KEY") else None
+
+    config = StoreConfig(
+        path=actual_store,
+        config_dir=config_dir,
+        store_path=store_path_str,
+        embedding=None,
+        summarization=ProviderConfig("truncate"),
+        document=ProviderConfig("composite"),
+        integrations=dict(existing.integrations) if existing else {},
+        remote=stored_remote,
+    )
+    save_config(config)
+    stop_daemon(config.path, force=True)
+
+    installed_tools = _install_selected_tools(config, selected_tools, tool_choices)
+    _print_remote_summary(config, remote, installed_tools)
     return config
+
+
+def _print_remote_summary(
+    config: StoreConfig,
+    remote: RemoteConfig,
+    installed_tools: list[str],
+) -> None:
+    """Print summary for a hosted-service configuration."""
+    print("  ---", file=sys.stderr)
+    print(file=sys.stderr)
+
+    store_loc = config.config_dir if config.config_dir else config.path
+    print(f"  Store initialized at {store_loc}", file=sys.stderr)
+
+    if installed_tools:
+        print(f"  Hooks installed for {', '.join(installed_tools)}", file=sys.stderr)
+    else:
+        print("  Hooks: none", file=sys.stderr)
+
+    print(f"  Remote: {remote.api_url}" + (
+        f" (project: {remote.project})" if remote.project else ""
+    ), file=sys.stderr)
+    print("  Embeddings/summarization: handled by remote", file=sys.stderr)
+    print("  Credentials: verified", file=sys.stderr)
+
+    print(file=sys.stderr)
+    print("  Run `keep now` to get started.", file=sys.stderr)
+    print(file=sys.stderr)
 
 
 def _print_summary(config: StoreConfig, installed_tools: list[str]) -> None:

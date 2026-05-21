@@ -80,15 +80,10 @@ owner = "alice"
 required = ["user"]                    # Tags that must be present on every put()
 namespace_keys = ["category", "user"]  # LangGraph namespace-to-tag mapping
 
-[remote_store]
-api_url = "https://api.keepnotes.ai"   # Optional: authoritative remote store
-api_key = "kn_..."
-project = "my-project"
-
-[remote_task]
-api_url = "https://api.keepnotes.ai"   # Optional: hosted background task delegation
-api_key = "kn_..."
-project = "my-project"
+[remote]
+api_url = "https://api.keepnotes.ai"   # Optional: hosted keep backend
+api_key = "kn_..."                     # See "Adding an API key" below
+project = "my-project"                 # Optional: project slug sent as X-Project
 ```
 
 ### Tags section details
@@ -113,9 +108,35 @@ keep put "test"                    # That's it — storage, search, and summariz
 Works across all your tools (Claude Code, Kiro, Codex) with the same API key. Project isolation, media pipelines, and backups are managed for you.
 
 Environment variables `KEEPNOTES_API_URL`, `KEEPNOTES_API_KEY`, and
-`KEEPNOTES_PROJECT` target the remote authoritative store. In `keep.toml`, the
-authoritative store is configured under `[remote_store]`. Hosted background task
-delegation, when configured separately, uses `[remote_task]`.
+`KEEPNOTES_PROJECT` configure the remote keep backend. In `keep.toml` the same
+backend is configured under a single `[remote]` section — both the
+authoritative CLI/MCP path and hosted background task delegation share these
+credentials.
+
+#### Adding an API key
+
+Either set the environment variable (preferred when you don't want the key on
+disk):
+
+```bash
+export KEEPNOTES_API_KEY=kn_live_...
+```
+
+…or add the `[remote]` section to your `keep.toml`:
+
+```toml
+[remote]
+api_url = "https://api.keepnotes.ai"
+api_key = "kn_live_..."
+project = "my-project"   # optional
+```
+
+When a `[remote]` section contains an `api_key`, keep writes the config file
+with `0600` permissions so other users on the system can't read the secret.
+
+`keep config --setup` detects whichever form is present (env or TOML), skips
+the local embedding/summarization prompts, and verifies the credentials by
+pinging the remote backend.
 
 ### Ollama (Recommended Local Option)
 

@@ -206,13 +206,17 @@ class StoreConfig:
     # Tool integrations tracking (presence of key = handled, value = installed or skipped)
     integrations: dict[str, Any] = field(default_factory=dict)
 
-    # Remote task delegation backend (if set, Keeper delegates expensive
-    # background processing to a hosted service).
+    # Remote keep backend (hosted at keep.generalbusiness.ai or self-hosted).
+    # When set, the CLI/MCP layer talks to the remote keep directly through a
+    # RemoteKeeper; a local Keeper instance (e.g. inside the daemon) will also
+    # delegate expensive background tasks (summarize, OCR) to the same backend
+    # via the TaskClient using these same credentials.
     remote: Optional[RemoteConfig] = None
-
-    # Remote authoritative store backend. When set, read/write note operations
-    # should target this backend instead of the local store.
-    remote_store: Optional[RemoteConfig] = None
+    # The [remote] section as it exists on disk. Runtime env vars may override
+    # ``remote`` for this process, but save_config() must preserve the persisted
+    # section instead of deleting or overwriting it with ambient smoke/debug env.
+    remote_persist: Optional[RemoteConfig] = field(default=None, repr=False, compare=False)
+    remote_from_env: bool = field(default=False, repr=False, compare=False)
 
     # Required tags — put() raises ValueError if any of these keys are missing.
     # System notes (dot-prefix IDs like .meta/*, .tag/*) are exempt.
@@ -846,48 +850,49 @@ def load_config(config_dir: Path) -> StoreConfig:
     # Parse optional content_extractor section
     content_extractor_config = parse_provider(data["content_extractor"]) if "content_extractor" in data else None
 
-    # Parse remote authoritative store config.
+    # Parse remote backend config. There is exactly one such backend per store
+    # — the same credentials are used for the authoritative RemoteKeeper and
+    # for hosted background task delegation (TaskClient).
     #
-    # Compatibility:
-    # - env vars still target the remote authoritative store
-    # - old TOML [remote] still routes here if [remote_store] is absent
-    remote_store = None
-    remote_store_data = data.get("remote_store", {})
-    legacy_remote_data = data.get("remote", {})
+    # Legacy sections [remote_store] and [remote_task] are no longer accepted.
+    # When found we fail loudly so users notice and migrate.
+    legacy_sections = [s for s in ("remote_store", "remote_task") if s in data]
+    if legacy_sections:
+        names = ", ".join(f"[{s}]" for s in legacy_sections)
+        raise ValueError(
+            f"{config_path}: {names} is no longer supported — rename to [remote]. "
+            "Both sections used the same credentials; merge into a single [remote] "
+            "section with api_url, api_key, and (optionally) project."
+        )
+
+    remote = None
+    remote_data = data.get("remote", {})
+    remote_persist = None
+    if remote_data.get("api_key"):
+        remote_persist = RemoteConfig(
+            api_url=remote_data.get("api_url") or "https://api.keepnotes.ai",
+            api_key=remote_data["api_key"],
+            project=remote_data.get("project") or None,
+        )
+    env_has_remote = bool(os.environ.get("KEEPNOTES_API_KEY"))
     api_url = (
         os.environ.get("KEEPNOTES_API_URL")
-        or remote_store_data.get("api_url")
-        or legacy_remote_data.get("api_url")
+        or remote_data.get("api_url")
         or "https://api.keepnotes.ai"
     )
     api_key = (
         os.environ.get("KEEPNOTES_API_KEY")
-        or remote_store_data.get("api_key")
-        or legacy_remote_data.get("api_key")
+        or remote_data.get("api_key")
     )
     project = (
         os.environ.get("KEEPNOTES_PROJECT")
-        or remote_store_data.get("project")
-        or legacy_remote_data.get("project")
+        or remote_data.get("project")
     )
     if api_url and api_key:
-        remote_store = RemoteConfig(
+        remote = RemoteConfig(
             api_url=api_url, api_key=api_key, project=project or None,
         )
-
-    # Parse remote task-delegation config. This is intentionally separate from
-    # the authoritative-store routing above.
-    remote = None
-    remote_data = data.get("remote_task", {})
-    task_api_url = remote_data.get("api_url")
-    task_api_key = remote_data.get("api_key")
-    task_project = remote_data.get("project")
-    if task_api_url and task_api_key:
-        remote = RemoteConfig(
-            api_url=task_api_url,
-            api_key=task_api_key,
-            project=task_project or None,
-        )
+    remote_from_env = env_has_remote and remote_persist is None
 
     # Parse pluggable backend config
     backend = data.get("store", {}).get("backend", "local")
@@ -939,7 +944,6 @@ def load_config(config_dir: Path) -> StoreConfig:
         if _is_remote(summarization_config):
             summarization_config = ProviderConfig("truncate")
         remote = None
-        remote_store = None
 
     budget_per_flow = int(data.get("store", {}).get("budget_per_flow", 5))
     max_dir_files = int(data.get("store", {}).get("max_dir_files", 1000))
@@ -973,7 +977,8 @@ def load_config(config_dir: Path) -> StoreConfig:
         labeled_ref_format_verified=labeled_ref_format_verified,
         integrations=integrations,
         remote=remote,
-        remote_store=remote_store,
+        remote_persist=remote_persist,
+        remote_from_env=remote_from_env,
         backend=backend,
         backend_params=backend_params,
         budget_per_flow=budget_per_flow,
@@ -1093,27 +1098,20 @@ def save_config(config: StoreConfig) -> None:
     if config.integrations:
         data["integrations"] = config.integrations
 
-    # Add remote authoritative-store config if set (only from TOML, not env vars)
-    if config.remote_store and not (
-        os.environ.get("KEEPNOTES_API_URL") or os.environ.get("KEEPNOTES_API_KEY")
-    ):
-        remote_store_data = {
-            "api_url": config.remote_store.api_url,
-            "api_key": config.remote_store.api_key,
-        }
-        if config.remote_store.project:
-            remote_store_data["project"] = config.remote_store.project
-        data["remote_store"] = remote_store_data
-
-    # Add remote task-delegation config if set.
-    if config.remote:
+    # Add remote backend config if set. Persist the on-disk [remote] values
+    # when they existed, even if ambient KEEPNOTES_* env vars override runtime
+    # behavior. Omit only env-only remote credentials so secrets stay in env.
+    remote_to_persist = config.remote_persist or (
+        None if config.remote_from_env else config.remote
+    )
+    if remote_to_persist:
         remote_data = {
-            "api_url": config.remote.api_url,
-            "api_key": config.remote.api_key,
+            "api_url": remote_to_persist.api_url,
+            "api_key": remote_to_persist.api_key,
         }
-        if config.remote.project:
-            remote_data["project"] = config.remote.project
-        data["remote_task"] = remote_data
+        if remote_to_persist.project:
+            remote_data["project"] = remote_to_persist.project
+        data["remote"] = remote_data
 
     # Security: detect any secrets (API keys, tokens) in the config so we
     # can enforce restrictive file permissions (0o600) to prevent other users
@@ -1126,7 +1124,10 @@ def save_config(config: StoreConfig) -> None:
         p and p.params.get("api_key") for p in _secret_providers
     )
     has_secrets = bool(
-        config.remote_store or config.remote or config.backend_params or has_provider_secrets
+        remote_to_persist
+        or config.remote
+        or config.backend_params
+        or has_provider_secrets
     )
     if has_secrets:
         # Config may contain plaintext API keys — ensure only the owning

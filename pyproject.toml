@@ -158,10 +158,11 @@ convention = "google"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = [".venv", "dist", ".git"]
-addopts = "-m 'not slow'"
+addopts = "-m 'not slow and not smoke'"
 markers = [
     "slow: marks tests as slow (require ML models)",
     "e2e: marks tests as end-to-end (require real providers)",
+    "smoke: end-to-end smoke tests against the live keep.generalbusiness.ai service (require KEEPNOTES_API_KEY; opt-in via -m smoke)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:importlib._bootstrap",

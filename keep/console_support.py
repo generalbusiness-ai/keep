@@ -759,21 +759,21 @@ See: https://github.com/generalbusiness-ai/keep#installation
 """
 
 
-def _authoritative_remote_store(config):
-    """Return the ``remote_store`` config if valid, else None."""
-    remote_store = getattr(config, "remote_store", None)
-    if remote_store is None:
+def _authoritative_remote(config):
+    """Return the ``remote`` config if valid, else None."""
+    remote = getattr(config, "remote", None)
+    if remote is None:
         return None
-    api_url = getattr(remote_store, "api_url", None)
-    api_key = getattr(remote_store, "api_key", None)
-    project = getattr(remote_store, "project", None)
+    api_url = getattr(remote, "api_url", None)
+    api_key = getattr(remote, "api_key", None)
+    project = getattr(remote, "project", None)
     if not isinstance(api_url, str) or not api_url.strip():
         return None
     if not isinstance(api_key, str) or not api_key.strip():
         return None
     if project is not None and not isinstance(project, str):
         return None
-    return remote_store
+    return remote
 
 
 def _get_keeper(store: Optional[Path], *, _force_local: bool = False) -> "Keeper":
@@ -849,15 +849,15 @@ def _get_keeper(store: Optional[Path], *, _force_local: bool = False) -> "Keeper
             except Exception as e:
                 logger.warning("System doc setup deferred: %s", e)
 
-        # Check for remote authoritative-store config in TOML.
-        remote_store = _authoritative_remote_store(kp.config) if kp.config else None
-        if remote_store and not _force_local:
+        # Check for remote backend config in TOML.
+        remote_cfg = _authoritative_remote(kp.config) if kp.config else None
+        if remote_cfg and not _force_local:
             from .remote import RemoteKeeper
             remote = RemoteKeeper(
-                remote_store.api_url,
-                remote_store.api_key,
+                remote_cfg.api_url,
+                remote_cfg.api_key,
                 kp.config,
-                project=remote_store.project,
+                project=remote_cfg.project,
             )
             atexit.register(remote.close)
             kp.close()  # Don't need the local Keeper
@@ -1420,15 +1420,15 @@ def run_pending_daemon(
     shutdown_requested = False
     export_keeper = kp
 
-    remote_store = _authoritative_remote_store(kp.config) if kp.config else None
-    if remote_store:
+    remote_cfg = _authoritative_remote(kp.config) if kp.config else None
+    if remote_cfg:
         from .remote import RemoteKeeper
 
         export_keeper = RemoteKeeper(
-            remote_store.api_url,
-            remote_store.api_key,
+            remote_cfg.api_url,
+            remote_cfg.api_key,
             kp.config,
-            project=remote_store.project,
+            project=remote_cfg.project,
         )
 
     if processor_lock_acquired_here:

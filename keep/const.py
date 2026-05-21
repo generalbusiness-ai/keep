@@ -15,6 +15,10 @@ DAEMON_PORT_FILE = ".daemon.port"
 DAEMON_TOKEN_FILE = ".daemon.token"
 DAEMON_PID_FILE = ".daemon.pid"
 OPS_LOG_FILE = "keep-ops.log"
+# Separate log file for client-side activity (CLI/MCP) when calls bypass the
+# local daemon (e.g. via [remote]). Keeping it distinct from keep-ops.log
+# avoids cross-process write contention with the daemon's rotating handler.
+CLIENT_LOG_FILE = "keep-client.log"
 
 # Seconds the daemon may run with zero processed work, zero failed work, zero
 # flow activity, and no active watches/mirrors/timers before it exits and

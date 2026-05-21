@@ -7,7 +7,12 @@ import os
 import sys
 import warnings
 
-from .const import OPS_LOG_BACKUP_COUNT, OPS_LOG_FILE, OPS_LOG_MAX_BYTES
+from .const import (
+    CLIENT_LOG_FILE,
+    OPS_LOG_BACKUP_COUNT,
+    OPS_LOG_FILE,
+    OPS_LOG_MAX_BYTES,
+)
 
 # Set environment variables BEFORE any imports to suppress warnings early
 if not os.environ.get("KEEP_VERBOSE"):
@@ -77,20 +82,16 @@ def enable_debug_mode():
         logging.getLogger(name).setLevel(logging.DEBUG)
 
 
-def configure_ops_log(store_path):
-    """Configure a persistent operations log for a keep store.
-
-    Writes to {store_path}/keep-ops.log using a rotating file handler
-    (1MB max, 3 backups). Always active regardless of --verbose.
-    Returns the handler so it can be removed on close().
-    """
+def _attach_rotating_handler(log_path):
+    """Attach a rotating INFO file handler at log_path to the keep logger."""
     import logging
     from logging.handlers import RotatingFileHandler
     from pathlib import Path
 
-    log_path = Path(store_path) / OPS_LOG_FILE
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        str(log_path),
+        str(path),
         maxBytes=OPS_LOG_MAX_BYTES,
         backupCount=OPS_LOG_BACKUP_COUNT,
     )
@@ -107,3 +108,26 @@ def configure_ops_log(store_path):
         keep_logger.setLevel(logging.INFO)
 
     return handler
+
+
+def configure_ops_log(store_path):
+    """Configure a persistent operations log for the keep daemon/local Keeper.
+
+    Writes to {store_path}/keep-ops.log using a rotating file handler
+    (1MB max, 3 backups). Always active regardless of --verbose.
+    Returns the handler so it can be removed on close().
+    """
+    from pathlib import Path
+    return _attach_rotating_handler(Path(store_path) / OPS_LOG_FILE)
+
+
+def configure_client_log(log_dir):
+    """Configure a client-side operations log for RemoteKeeper/MCP-remote.
+
+    Writes to {log_dir}/keep-client.log. Used when calls bypass the local
+    daemon (e.g. when [remote] is configured) so the CLI/MCP process still
+    produces an on-disk audit trail. Returns the handler so callers can
+    detach it on shutdown.
+    """
+    from pathlib import Path
+    return _attach_rotating_handler(Path(log_dir) / CLIENT_LOG_FILE)

@@ -5,7 +5,9 @@ Status: In Progress
 
 Implemented so far:
 
-- Phase 1 foundation: `remote_store` is distinct from remote task delegation
+- Phase 1 foundation: remote backend config (formerly split into `remote_store`
+  and `remote_task`) is now a single `[remote]` section in `keep.toml`; the
+  CLI/MCP RemoteKeeper path and hosted task delegation share the same credentials
 - Phase 3 export transport: remote full export works through `RemoteKeeper`
 - Phase 3 markdown baseline slice: one-shot markdown export now works against a
   remote authoritative store through note-bundle export transport
@@ -329,35 +331,38 @@ remote note in the authoritative store.
 
 ## Configuration Model
 
-Do not add a wizard.
+The earlier draft of this section proposed two distinct config blocks —
+`[remote_store]` for authoritative routing and `[remote_task]` for delegated
+background processing. That split has since been collapsed: in practice the
+same hosted service handles both, the same credentials apply to both, and
+keeping them separate produced footgun-y key duplication.
 
-Use explicit config keys instead.
-
-Suggested split:
-
-### Remote store configuration
-
-Defines where authoritative note operations go.
+The current shipping shape is a **single** `[remote]` section. CLI/MCP route
+through `RemoteKeeper` over HTTPS, and any locally-running Keeper (e.g. in
+the daemon) reuses the same credentials to spin up the `TaskClient` for
+hosted background tasks.
 
 Example:
 
 ```toml
-[remote_store]
+[remote]
 api_url = "https://keep.example.com"
 api_key = "..."
 project = "my-project"
 ```
 
-### Remote task delegation configuration
+Equivalent environment overrides:
 
-If background hosted processing remains separately configurable, keep it
-separate from remote-store routing.
+- `KEEPNOTES_API_URL`
+- `KEEPNOTES_API_KEY`
+- `KEEPNOTES_PROJECT`
 
-The current `config.remote` meaning is overloaded and should be split so these
-cases are distinct:
+Env vars override TOML field-by-field at load time; `save_config()` preserves
+the on-disk `[remote]` section even when env vars are present so the file
+keeps working after the env is unset.
 
-- use a remote store as the primary backend
-- delegate some background processing to a remote service
+The legacy `[remote_store]` and `[remote_task]` sections are no longer parsed:
+`load_config()` fails with a clear error pointing users at `[remote]`.
 
 ### Local mirror runtime configuration
 

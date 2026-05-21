@@ -75,11 +75,14 @@ class TestEmbeddingProviderAbsent:
         config_file = tmp_path / "keep.toml"
         assert config_file.exists()
 
-    def test_load_config_treats_legacy_remote_as_remote_store(self, tmp_path, monkeypatch) -> None:
-        """Legacy [remote] config still routes the authoritative store."""
+    def test_load_config_reads_unified_remote_section(self, tmp_path, monkeypatch) -> None:
+        """[remote] populates config.remote (the single remote-backend field)."""
         from keep.config import load_config
 
         monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
 
         (tmp_path / "keep.toml").write_text(
             """
@@ -96,38 +99,170 @@ project = "demo"
 
         config = load_config(tmp_path)
 
-        assert config.remote is None
-        assert config.remote_store is not None
-        assert config.remote_store.api_url == "https://api.example.test"
-        assert config.remote_store.api_key == "kn_test_123"
-        assert config.remote_store.project == "demo"
+        assert config.remote is not None
+        assert config.remote.api_url == "https://api.example.test"
+        assert config.remote.api_key == "kn_test_123"
+        assert config.remote.project == "demo"
 
-    def test_save_config_writes_remote_store_and_remote_task_sections(self, tmp_path) -> None:
-        """save_config persists authoritative-store and task delegation separately."""
+    def test_load_config_rejects_legacy_remote_store_section(self, tmp_path) -> None:
+        """[remote_store] is no longer accepted — load_config raises."""
+        from keep.config import load_config
+
+        (tmp_path / "keep.toml").write_text(
+            """
+[store]
+version = 2
+
+[remote_store]
+api_url = "https://api.example.test"
+api_key = "kn_test_123"
+""".strip() + "\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"\[remote_store\].*rename to \[remote\]"):
+            load_config(tmp_path)
+
+    def test_load_config_rejects_legacy_remote_task_section(self, tmp_path) -> None:
+        """[remote_task] is no longer accepted — load_config raises."""
+        from keep.config import load_config
+
+        (tmp_path / "keep.toml").write_text(
+            """
+[store]
+version = 2
+
+[remote_task]
+api_url = "https://api.example.test"
+api_key = "kn_test_123"
+""".strip() + "\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"\[remote_task\].*rename to \[remote\]"):
+            load_config(tmp_path)
+
+    def test_save_config_writes_unified_remote_section(self, tmp_path, monkeypatch) -> None:
+        """save_config writes a single [remote] section."""
         from keep.config import RemoteConfig, StoreConfig, save_config
+
+        monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
 
         config = StoreConfig(
             path=tmp_path,
             config_dir=tmp_path,
             embedding=None,
-            remote_store=RemoteConfig(
+            remote=RemoteConfig(
                 api_url="https://store.example.test",
                 api_key="kn_store",
                 project="alpha",
-            ),
-            remote=RemoteConfig(
-                api_url="https://tasks.example.test",
-                api_key="kn_tasks",
-                project="beta",
             ),
         )
 
         save_config(config)
 
         saved = (tmp_path / "keep.toml").read_text(encoding="utf-8")
-        assert "[remote_store]" in saved
+        assert "[remote]" in saved
+        assert "[remote_store]" not in saved
+        assert "[remote_task]" not in saved
         assert 'api_url = "https://store.example.test"' in saved
+        assert 'api_key = "kn_store"' in saved
         assert 'project = "alpha"' in saved
-        assert "[remote_task]" in saved
-        assert 'api_url = "https://tasks.example.test"' in saved
-        assert 'project = "beta"' in saved
+
+    def test_save_config_preserves_persisted_remote_under_env_override(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Ambient smoke/debug env must not erase or overwrite [remote]."""
+        from keep.config import load_config, save_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.setenv("KEEPNOTES_API_URL", "https://env.example.test")
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env")
+        monkeypatch.setenv("KEEPNOTES_PROJECT", "env-project")
+
+        (tmp_path / "keep.toml").write_text(
+            """
+[store]
+version = 2
+
+[remote]
+api_url = "https://file.example.test"
+api_key = "kn_file"
+project = "file-project"
+""".strip() + "\n",
+            encoding="utf-8",
+        )
+
+        config = load_config(tmp_path)
+        assert config.remote is not None
+        assert config.remote.api_url == "https://env.example.test"
+        assert config.remote.api_key == "kn_env"
+        assert config.remote.project == "env-project"
+
+        save_config(config)
+
+        saved = (tmp_path / "keep.toml").read_text(encoding="utf-8")
+        assert "[remote]" in saved
+        assert 'api_url = "https://file.example.test"' in saved
+        assert 'api_key = "kn_file"' in saved
+        assert 'project = "file-project"' in saved
+        assert "kn_env" not in saved
+
+    def test_save_config_chmods_persisted_remote_under_local_only(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """remote_persist secrets still require 0600 when remote is disabled."""
+        from keep.config import load_config, save_config
+
+        monkeypatch.setenv("KEEP_LOCAL_ONLY", "1")
+        monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        config_path = tmp_path / "keep.toml"
+        config_path.write_text(
+            """
+[store]
+version = 2
+
+[remote]
+api_url = "https://file.example.test"
+api_key = "kn_file"
+project = "file-project"
+""".strip() + "\n",
+            encoding="utf-8",
+        )
+        config_path.chmod(0o644)
+
+        config = load_config(tmp_path)
+        assert config.remote is None
+        assert config.remote_persist is not None
+
+        save_config(config)
+
+        assert config_path.stat().st_mode & 0o777 == 0o600
+        saved = config_path.read_text(encoding="utf-8")
+        assert "[remote]" in saved
+        assert 'api_key = "kn_file"' in saved
+
+    def test_save_config_omits_env_only_remote(self, tmp_path, monkeypatch) -> None:
+        """Env-only remote credentials should not be written to keep.toml."""
+        from keep.config import load_config, save_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.setenv("KEEPNOTES_API_URL", "https://env.example.test")
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env")
+
+        (tmp_path / "keep.toml").write_text(
+            "[store]\nversion = 2\n",
+            encoding="utf-8",
+        )
+
+        config = load_config(tmp_path)
+        assert config.remote is not None
+        assert config.remote_from_env is True
+
+        save_config(config)
+
+        saved = (tmp_path / "keep.toml").read_text(encoding="utf-8")
+        assert "[remote]" not in saved
+        assert "kn_env" not in saved

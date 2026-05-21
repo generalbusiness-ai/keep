@@ -22,11 +22,11 @@ Exports all user documents, versions, and parts as JSON. **System documents (dot
 
 Markdown mode writes a **directory** with one `.md` file per note. The directory is created if it doesn't exist; for a one-shot export it must be empty, but `--sync` allows writing into an existing directory.
 
-One-shot markdown export uses the configured authoritative store. If
-`remote_store` is configured, `keep data export ~/vault --format md` exports
-from that remote store through the remote export and note-bundle APIs. Continuous
-`--sync` also works with a remote authoritative store, but the daemon still
-owns the local mirror root and writes files only on this machine.
+One-shot markdown export uses the configured authoritative store. If a
+`[remote]` backend is configured, `keep data export ~/vault --format md`
+exports from that remote backend through the remote export and note-bundle
+APIs. Continuous `--sync` also works with a remote backend, but the daemon
+still owns the local mirror root and writes files only on this machine.
 
 Each file has flat YAML frontmatter followed by the note summary as the body. The frontmatter is one flat map — no nested `tags:` block — with three kinds of keys:
 

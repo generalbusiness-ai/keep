@@ -1,6 +1,9 @@
 """MCP stdio server for keep — reflective memory for AI agents.
 
-Thin HTTP wrapper over the daemon. No local Keeper, no models, no database.
+Thin HTTP wrapper over a keep backend. When [remote] is configured (via env
+or keep.toml), MCP tool calls go directly to the hosted keep service over
+HTTPS. Otherwise they route to the local daemon. Either way the MCP layer
+holds no Keeper, no models, and no database of its own.
 
 Three tools: keep_flow (all operations), keep_help (documentation),
 keep_prompt (practice prompts).
@@ -15,6 +18,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from typing import Annotated, Any, Optional
 from urllib.parse import quote, unquote
 
@@ -35,10 +39,11 @@ from mcp.types import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from ._context_resolution import _SUPPORTED_MCP_PROMPT_ARGS
+from .config import RemoteConfig
 from .daemon_client import get_port, http_request_with_discovery_retry
 from .help import get_help_topic
+from .logging_config import configure_client_log
 
-_port: Optional[int] = None
 logger = logging.getLogger(__name__)
 
 _MCP_PROMPT_ARG_DESCRIPTIONS: dict[str, str] = {
@@ -53,55 +58,230 @@ assert set(_MCP_PROMPT_ARG_DESCRIPTIONS) == set(_SUPPORTED_MCP_PROMPT_ARGS), (
 )
 
 
-def _ensure_daemon() -> int:
-    """Connect to (or auto-start) the daemon. Returns port."""
-    global _port
-    if _port is None:
-        _port = get_port(os.environ.get("KEEP_STORE_PATH"))
-    return _port
+class _MCPBackend:
+    """Routing abstraction: where do MCP tool calls go?"""
+
+    def post(self, path: str, body: dict) -> tuple[int, dict]:
+        raise NotImplementedError
+
+    def get(self, path: str) -> tuple[int, dict]:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
+
+    # Used by the daemon-mode entry point in main() for eager fail-fast.
+    # Remote-mode backends override to a no-op.
+    def warm_up(self) -> None:
+        pass
+
+
+class _DaemonBackend(_MCPBackend):
+    """Default backend — talk to the local keep daemon (auto-discovered port)."""
+
+    def __init__(self) -> None:
+        self._port: Optional[int] = None
+
+    def _ensure(self) -> int:
+        if self._port is None:
+            self._port = get_port(os.environ.get("KEEP_STORE_PATH"))
+        return self._port
+
+    def warm_up(self) -> None:
+        # Surface daemon startup issues immediately rather than at first tool call.
+        self._ensure()
+
+    def post(self, path: str, body: dict) -> tuple[int, dict]:
+        status, result = http_request_with_discovery_retry(
+            "POST", self._ensure(), path, body,
+            store_override=os.environ.get("KEEP_STORE_PATH"),
+        )
+        if status == 401:
+            # Daemon may have restarted on a new port. Re-resolve.
+            self._port = None
+            status, result = http_request_with_discovery_retry(
+                "POST", self._ensure(), path, body,
+                store_override=os.environ.get("KEEP_STORE_PATH"),
+            )
+        return status, result
+
+    def get(self, path: str) -> tuple[int, dict]:
+        status, result = http_request_with_discovery_retry(
+            "GET", self._ensure(), path,
+            store_override=os.environ.get("KEEP_STORE_PATH"),
+        )
+        if status == 401:
+            self._port = None
+            status, result = http_request_with_discovery_retry(
+                "GET", self._ensure(), path,
+                store_override=os.environ.get("KEEP_STORE_PATH"),
+            )
+        return status, result
+
+
+class _RemoteBackend(_MCPBackend):
+    """Remote backend — talk to the hosted keep service over HTTPS."""
+
+    def __init__(self, remote: RemoteConfig, log_dir=None) -> None:
+        import httpx
+        from .remote import validate_project_slug, validate_remote_api_url
+        from .types import user_agent
+
+        # Same URL/project guards as RemoteKeeper — never send bearer tokens
+        # over plain HTTP, and reject malformed project slugs upfront.
+        self._api_url = validate_remote_api_url(remote.api_url)
+        project = validate_project_slug(remote.project)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {remote.api_key}",
+            "User-Agent": user_agent(),
+        }
+        if project:
+            headers["X-Project"] = project
+        self._client = httpx.Client(
+            base_url=self._api_url, headers=headers, timeout=30.0,
+        )
+        # Attach the client-side ops log so MCP tool traffic produces an
+        # on-disk audit trail in remote mode. Failures are non-fatal.
+        self._log_handler = None
+        if log_dir is not None:
+            try:
+                self._log_handler = configure_client_log(log_dir)
+            except OSError as e:
+                logger.debug("Could not attach client log at %s: %s", log_dir, e)
+
+    def _log_call(self, method: str, path: str, status: int, wall_ms: int) -> None:
+        logger.info(
+            "mcp.remote: %s %s status=%d wall=%dms host=%s",
+            method, path, status, wall_ms, self._api_url,
+        )
+
+    def _do(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, dict]:
+        import httpx
+        start = time.monotonic()
+        try:
+            if body is None:
+                resp = self._client.request(method, path)
+            else:
+                resp = self._client.request(method, path, json=body)
+        except httpx.HTTPError as e:
+            wall_ms = int((time.monotonic() - start) * 1000)
+            self._log_call(method, path, 0, wall_ms)
+            return 0, {"error": str(e)}
+        wall_ms = int((time.monotonic() - start) * 1000)
+        self._log_call(method, path, resp.status_code, wall_ms)
+        try:
+            data = resp.json()
+            if not isinstance(data, dict):
+                data = {"value": data}
+        except ValueError:
+            data = {"error": resp.text}
+        return resp.status_code, data
+
+    def post(self, path: str, body: dict) -> tuple[int, dict]:
+        return self._do("POST", path, body)
+
+    def get(self, path: str) -> tuple[int, dict]:
+        return self._do("GET", path)
+
+    def close(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
+        if self._log_handler is not None:
+            try:
+                logging.getLogger("keep").removeHandler(self._log_handler)
+                self._log_handler.close()
+            except Exception:
+                pass
+            self._log_handler = None
+
+
+def _load_remote_config() -> tuple[Optional[RemoteConfig], Optional[Any]]:
+    """Detect remote-backend config from env vars layered over keep.toml.
+
+    Returns (remote_config_or_None, config_dir_for_logging). The config_dir
+    is the directory containing keep.toml (used for the client log location).
+
+    Resolution order, per field (api_url, api_key, project):
+        env var  >  keep.toml [remote]  >  bundled default (api_url only)
+
+    Honors KEEP_LOCAL_ONLY so tests and constrained environments stay on the
+    daemon backend.
+    """
+    if os.environ.get("KEEP_LOCAL_ONLY"):
+        return None, None
+
+    # Always try to load TOML first so config-owned api_url/project still
+    # apply when only the api_key lives in the environment.
+    toml_remote: Optional[RemoteConfig] = None
+    toml_config_dir = None
+    try:
+        from .config import load_config
+        config_dir = _resolve_config_dir()
+        config = load_config(config_dir)
+        if config.remote_persist:
+            toml_remote = config.remote_persist
+        toml_config_dir = config.config_dir or config_dir
+    except (FileNotFoundError, ValueError):
+        toml_config_dir = _resolve_config_dir()
+
+    env_url = os.environ.get("KEEPNOTES_API_URL")
+    env_key = os.environ.get("KEEPNOTES_API_KEY")
+    env_project = os.environ.get("KEEPNOTES_PROJECT")
+
+    # Overlay env on TOML, field by field.
+    api_url = env_url or (toml_remote.api_url if toml_remote else None) \
+        or "https://api.keepnotes.ai"
+    api_key = env_key or (toml_remote.api_key if toml_remote else None)
+    project = env_project or (toml_remote.project if toml_remote else None)
+
+    if not api_key:
+        return None, None
+    return RemoteConfig(api_url=api_url, api_key=api_key, project=project or None), \
+        toml_config_dir
+
+
+def _resolve_config_dir():
+    """Locate the config directory keep would use for this process.
+
+    Mirrors console_support._get_keeper's resolution order so a user invoking
+    ``keep --store /path mcp`` (which sets KEEP_STORE_PATH but not KEEP_CONFIG)
+    still picks up that store's keep.toml.
+    """
+    from .paths import get_config_dir
+    if os.environ.get("KEEP_CONFIG"):
+        return get_config_dir()
+    store_override = os.environ.get("KEEP_STORE_PATH")
+    if store_override:
+        from pathlib import Path
+        return Path(store_override).resolve()
+    return get_config_dir()
+
+
+_backend: Optional[_MCPBackend] = None
+
+
+def _get_backend() -> _MCPBackend:
+    """Return the cached backend (daemon or remote, decided at first call)."""
+    global _backend
+    if _backend is not None:
+        return _backend
+    remote, log_dir = _load_remote_config()
+    if remote:
+        _backend = _RemoteBackend(remote, log_dir=log_dir)
+    else:
+        _backend = _DaemonBackend()
+    return _backend
 
 
 def _post(path: str, body: dict) -> tuple[int, dict]:
-    """POST to the daemon. Returns (status, json_body)."""
-    global _port
-    status, result = http_request_with_discovery_retry(
-        "POST",
-        _ensure_daemon(),
-        path,
-        body,
-        store_override=os.environ.get("KEEP_STORE_PATH"),
-    )
-    if status == 401:
-        # Daemon may have restarted on a new port. Re-resolve.
-        _port = None
-        status, result = http_request_with_discovery_retry(
-            "POST",
-            _ensure_daemon(),
-            path,
-            body,
-            store_override=os.environ.get("KEEP_STORE_PATH"),
-        )
-    return status, result
+    return _get_backend().post(path, body)
 
 
 def _get(path: str) -> tuple[int, dict]:
-    """GET from the daemon. Returns (status, json_body)."""
-    global _port
-    status, result = http_request_with_discovery_retry(
-        "GET",
-        _ensure_daemon(),
-        path,
-        store_override=os.environ.get("KEEP_STORE_PATH"),
-    )
-    if status == 401:
-        _port = None
-        status, result = http_request_with_discovery_retry(
-            "GET",
-            _ensure_daemon(),
-            path,
-            store_override=os.environ.get("KEEP_STORE_PATH"),
-        )
-    return status, result
+    return _get_backend().get(path)
 
 
 def _list_agent_prompt_metadata(*, suppress_errors: bool = False) -> list[dict[str, Any]]:
@@ -631,8 +811,10 @@ def main():
     # can deadlock on the stdin buffer lock held by the reader thread.
     signal.signal(signal.SIGINT, lambda *_: os._exit(130))
 
-    # Connect to daemon eagerly so setup issues surface immediately.
-    _ensure_daemon()
+    # Eagerly warm up the backend so setup issues surface immediately:
+    # daemon mode resolves the port; remote mode is a no-op (the first tool
+    # call covers it). Failures in remote mode would emerge on first use.
+    _get_backend().warm_up()
 
     mcp.run(transport="stdio")
 

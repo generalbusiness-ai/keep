@@ -9,12 +9,14 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Optional
 from urllib.parse import quote
 
 import httpx
 
 from .config import StoreConfig
+from .logging_config import configure_client_log
 from .flow_client import (
     delete_item as flow_delete_item,
     find_items as flow_find_items,
@@ -37,35 +39,55 @@ DEFAULT_TIMEOUT = 30.0
 _SLUG_RE = re.compile(r'^[a-z][a-z0-9-]{0,61}[a-z0-9]$')
 
 
+def validate_project_slug(project: Optional[str]) -> Optional[str]:
+    """Validate a project slug. Returns the slug unchanged or None.
+
+    Shared by RemoteKeeper and the MCP _RemoteBackend so both reject the
+    same set of malformed slugs before any HTTP request goes out.
+    """
+    if not project:
+        return None
+    if not _SLUG_RE.match(project):
+        raise ValueError(
+            f"Invalid project slug '{project}'. "
+            "Must start with a letter, 2-63 chars, lowercase letters/numbers/hyphens."
+        )
+    return project
+
+
+def validate_remote_api_url(api_url: str) -> str:
+    """Ensure a remote API URL is safe to send bearer tokens to.
+
+    Only HTTPS, or http loopback (localhost/127.0.0.1/::1) for local dev, is
+    accepted. Trailing slashes are stripped. Raises ValueError otherwise.
+    """
+    url = (api_url or "").rstrip("/")
+    if not url.startswith("https://"):
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        if host not in ("localhost", "127.0.0.1", "::1"):
+            raise ValueError(
+                f"Remote API URL must use HTTPS (got {url}). "
+                "Use HTTPS to protect API credentials, or use localhost for local development."
+            )
+    return url
+
+
 class RemoteKeeper:
     """Flow-host client backed by the keep HTTP API."""
 
     def __init__(self, api_url: str, api_key: str, config: StoreConfig, *, project: Optional[str] = None):
-        self.api_url = api_url.rstrip("/")
+        self.api_url = validate_remote_api_url(api_url)
         self.api_key = api_key
         self._config = config
         self.config = config  # alias for CLI compatibility
 
-        self.project = (
+        self.project = validate_project_slug(
             project
-            or (config.remote_store.project if config.remote_store else None)
+            or (config.remote.project if config.remote else None)
             or os.environ.get("KEEPNOTES_PROJECT")
             or None
         )
-        if self.project and not _SLUG_RE.match(self.project):
-            raise ValueError(
-                f"Invalid project slug '{self.project}'. "
-                "Must start with a letter, 2-63 chars, lowercase letters/numbers/hyphens."
-            )
-
-        if not self.api_url.startswith("https://"):
-            from urllib.parse import urlparse
-            host = urlparse(self.api_url).hostname or ""
-            if host not in ("localhost", "127.0.0.1", "::1"):
-                raise ValueError(
-                    f"Remote API URL must use HTTPS (got {self.api_url}). "
-                    "Use HTTPS to protect API credentials, or use localhost for local development."
-                )
 
         from .types import user_agent
         headers: dict[str, str] = {
@@ -81,31 +103,62 @@ class RemoteKeeper:
             base_url=self.api_url, headers=headers, timeout=DEFAULT_TIMEOUT)
         self._server_info_cache: dict[str, Any] | None = None
 
+        # Attach a client-side ops log so CLI/MCP traffic over the remote
+        # backend leaves an on-disk audit trail. Use the config_dir when set
+        # (config_dir is where keep.toml lives and is always writable), else
+        # fall back to the store path. Failures are non-fatal — clients that
+        # disable filesystem access (tests, MCPB sandboxing) still work.
+        self._client_log_handler = None
+        log_dir = (
+            config.config_dir if config and config.config_dir
+            else (config.path if config and config.path else None)
+        )
+        if log_dir is not None:
+            try:
+                self._client_log_handler = configure_client_log(log_dir)
+            except OSError as e:
+                logger.debug("Could not attach client log at %s: %s", log_dir, e)
+
     # -- HTTP helpers --
 
     @staticmethod
     def _q(id: str) -> str:
         return quote(id, safe="")
 
+    def _log_call(self, method: str, path: str, status: int, wall_ms: int) -> None:
+        """Emit a single-line INFO record per remote HTTP call."""
+        logger.info(
+            "remote: %s %s status=%d wall=%dms host=%s",
+            method, path, status, wall_ms, self.api_url,
+        )
+
     def _get(self, path: str, **params: Any) -> dict:
         filtered = {k: v for k, v in params.items() if v is not None}
+        start = time.monotonic()
         resp = self._client.get(path, params=filtered)
+        self._log_call("GET", path, resp.status_code, int((time.monotonic() - start) * 1000))
         self._raise_for_status(resp)
         return resp.json()
 
     def _post(self, path: str, json: dict) -> dict:
         filtered = {k: v for k, v in json.items() if v is not None}
+        start = time.monotonic()
         resp = self._client.post(path, json=filtered)
+        self._log_call("POST", path, resp.status_code, int((time.monotonic() - start) * 1000))
         self._raise_for_status(resp)
         return resp.json()
 
     def _patch(self, path: str, json: dict) -> dict:
+        start = time.monotonic()
         resp = self._client.patch(path, json=json)
+        self._log_call("PATCH", path, resp.status_code, int((time.monotonic() - start) * 1000))
         self._raise_for_status(resp)
         return resp.json()
 
     def _delete(self, path: str) -> dict:
+        start = time.monotonic()
         resp = self._client.delete(path)
+        self._log_call("DELETE", path, resp.status_code, int((time.monotonic() - start) * 1000))
         self._raise_for_status(resp)
         return resp.json()
 
@@ -459,3 +512,10 @@ class RemoteKeeper:
 
     def close(self) -> None:
         self._client.close()
+        if self._client_log_handler is not None:
+            try:
+                logging.getLogger("keep").removeHandler(self._client_log_handler)
+                self._client_log_handler.close()
+            except Exception:
+                pass
+            self._client_log_handler = None

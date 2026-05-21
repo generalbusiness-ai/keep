@@ -20,10 +20,22 @@ from keep.const import STATE_DELETE, STATE_PUT, STATE_QUERY_RESOLVE
 
 @pytest.fixture
 def mock_daemon():
-    """Patch _ensure_daemon and daemon request helper to avoid real daemon."""
-    with patch("keep.mcp._ensure_daemon", return_value=9999), \
-         patch("keep.mcp.http_request_with_discovery_retry") as mock_http:
-        yield mock_http
+    """Force MCP onto the daemon backend with a stubbed HTTP transport.
+
+    Pre-resolves the daemon backend's port so the helper short-circuits port
+    discovery; patches http_request_with_discovery_retry to drive responses.
+    Resets the cached backend on teardown to avoid cross-test bleed.
+    """
+    from keep import mcp as mcp_mod
+
+    backend = mcp_mod._DaemonBackend()
+    backend._port = 9999
+    mcp_mod._backend = backend
+    try:
+        with patch("keep.mcp.http_request_with_discovery_retry") as mock_http:
+            yield mock_http
+    finally:
+        mcp_mod._backend = None
 
 
 async def _keep_flow_schema(server):
@@ -124,24 +136,28 @@ class TestKeepFlow:
 
     @pytest.mark.asyncio
     async def test_flow_uses_shared_discovery_retry_helper(self):
+        from keep import mcp as mcp_mod
         from keep.mcp import keep_flow
 
-        with (
-            patch("keep.mcp._ensure_daemon", return_value=9999),
-            patch("keep.mcp.http_request_with_discovery_retry") as mock_http,
-        ):
-            mock_http.return_value = (200, {
-                "status": "done", "ticks": 1,
-                "data": {"ok": True},
-                "bindings": {}, "history": [], "cursor": None, "tried_queries": [],
-            })
+        backend = mcp_mod._DaemonBackend()
+        backend._port = 9999
+        mcp_mod._backend = backend
+        try:
+            with patch("keep.mcp.http_request_with_discovery_retry") as mock_http:
+                mock_http.return_value = (200, {
+                    "status": "done", "ticks": 1,
+                    "data": {"ok": True},
+                    "bindings": {}, "history": [], "cursor": None, "tried_queries": [],
+                })
 
-            result = await keep_flow(state=STATE_PUT, params={"content": "hello"})
+                result = await keep_flow(state=STATE_PUT, params={"content": "hello"})
 
-        parsed = json.loads(result)
-        assert parsed["status"] == "done"
-        mock_http.assert_called_once()
-        assert mock_http.call_args.args[:3] == ("POST", 9999, "/v1/flow")
+            parsed = json.loads(result)
+            assert parsed["status"] == "done"
+            mock_http.assert_called_once()
+            assert mock_http.call_args.args[:3] == ("POST", 9999, "/v1/flow")
+        finally:
+            mcp_mod._backend = None
 
 
 # ---------------------------------------------------------------------------
@@ -451,3 +467,299 @@ class TestKeepHelp:
         from keep.mcp import keep_help
         result = await keep_help(topic="flow-actions")
         assert "find" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Backend selection: daemon vs remote
+# ---------------------------------------------------------------------------
+
+class TestMCPBackendSelection:
+    """The MCP backend picks daemon-vs-remote from env/config, not flags."""
+
+    def setup_method(self):
+        from keep import mcp as mcp_mod
+        mcp_mod._backend = None
+
+    def teardown_method(self):
+        from keep import mcp as mcp_mod
+        if mcp_mod._backend is not None:
+            try:
+                mcp_mod._backend.close()
+            except Exception:
+                pass
+        mcp_mod._backend = None
+
+    def test_no_remote_yields_daemon_backend(self, monkeypatch):
+        from keep import mcp as mcp_mod
+
+        for var in ("KEEPNOTES_API_KEY", "KEEPNOTES_API_URL", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+        # KEEP_LOCAL_ONLY is the strongest signal — already set by conftest.
+        backend = mcp_mod._get_backend()
+        assert isinstance(backend, mcp_mod._DaemonBackend)
+
+    def test_keepnotes_env_yields_remote_backend(self, monkeypatch, tmp_path):
+        from keep import mcp as mcp_mod
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+        monkeypatch.setenv("KEEPNOTES_API_URL", "https://api.example.test")
+        monkeypatch.setattr("keep.paths.get_config_dir", lambda: tmp_path)
+
+        backend = mcp_mod._get_backend()
+        assert isinstance(backend, mcp_mod._RemoteBackend)
+        assert backend._api_url == "https://api.example.test"
+
+    def test_keep_local_only_overrides_remote_env(self, monkeypatch):
+        """KEEP_LOCAL_ONLY should win even if KEEPNOTES_API_KEY is set."""
+        from keep import mcp as mcp_mod
+
+        monkeypatch.setenv("KEEP_LOCAL_ONLY", "1")
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+        backend = mcp_mod._get_backend()
+        assert isinstance(backend, mcp_mod._DaemonBackend)
+
+    def test_toml_remote_section_yields_remote_backend(self, monkeypatch, tmp_path):
+        """[remote] in keep.toml is picked up when no env override is present."""
+        from keep import mcp as mcp_mod
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        for var in ("KEEPNOTES_API_KEY", "KEEPNOTES_API_URL", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+
+        (tmp_path / "keep.toml").write_text(
+            """
+[store]
+version = 2
+
+[remote]
+api_url = "https://api.example.test"
+api_key = "kn_test"
+project = "demo"
+""".strip() + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("keep.paths.get_config_dir", lambda: tmp_path)
+
+        backend = mcp_mod._get_backend()
+        assert isinstance(backend, mcp_mod._RemoteBackend)
+        assert backend._api_url == "https://api.example.test"
+
+    def test_env_key_overlays_on_toml_api_url(self, monkeypatch, tmp_path):
+        """KEEPNOTES_API_KEY alone must not erase api_url/project from TOML."""
+        from keep import mcp as mcp_mod
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+        monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env_only")
+
+        (tmp_path / "keep.toml").write_text(
+            """
+[store]
+version = 2
+
+[remote]
+api_url = "https://config.example.test"
+api_key = "kn_file"
+project = "from-file"
+""".strip() + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("KEEP_CONFIG", str(tmp_path))
+
+        remote, _ = mcp_mod._load_remote_config()
+        assert remote is not None
+        # api_url and project come from TOML; only the api_key was overridden.
+        assert remote.api_url == "https://config.example.test"
+        assert remote.api_key == "kn_env_only"
+        assert remote.project == "from-file"
+
+    def test_keep_store_path_resolves_config_dir(self, monkeypatch, tmp_path):
+        """`keep --store /path mcp` (sets KEEP_STORE_PATH) must find /path/keep.toml."""
+        from keep import mcp as mcp_mod
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEP_CONFIG", raising=False)
+        for var in ("KEEPNOTES_API_KEY", "KEEPNOTES_API_URL", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("KEEP_STORE_PATH", str(tmp_path))
+
+        (tmp_path / "keep.toml").write_text(
+            """
+[store]
+version = 2
+
+[remote]
+api_url = "https://store-path.example.test"
+api_key = "kn_store_path"
+""".strip() + "\n",
+            encoding="utf-8",
+        )
+
+        backend = mcp_mod._get_backend()
+        assert isinstance(backend, mcp_mod._RemoteBackend)
+        assert backend._api_url == "https://store-path.example.test"
+
+
+class TestMCPRemoteBackendRouting:
+    """Remote backend's HTTP behavior: routing, logging, error handling."""
+
+    def setup_method(self):
+        from keep import mcp as mcp_mod
+        mcp_mod._backend = None
+
+    def teardown_method(self):
+        from keep import mcp as mcp_mod
+        if mcp_mod._backend is not None:
+            try:
+                mcp_mod._backend.close()
+            except Exception:
+                pass
+        mcp_mod._backend = None
+
+    @pytest.mark.asyncio
+    async def test_keep_flow_uses_remote_backend_when_configured(
+        self, monkeypatch, tmp_path,
+    ):
+        from keep import mcp as mcp_mod
+        from keep.config import RemoteConfig
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        # Force remote backend with a mocked httpx client.
+        remote = RemoteConfig(
+            api_url="https://api.example.test", api_key="kn_test", project=None,
+        )
+        backend = mcp_mod._RemoteBackend(remote, log_dir=tmp_path)
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "done", "ticks": 1, "data": {"id": "abc"},
+            "bindings": {}, "history": [], "cursor": None, "tried_queries": [],
+        }
+        mock_client.request.return_value = mock_response
+        backend._client = mock_client
+        mcp_mod._backend = backend
+
+        result = await mcp_mod.keep_flow(state="put", params={"content": "hi"})
+
+        parsed = json.loads(result)
+        assert parsed["status"] == "done"
+        assert mock_client.request.called
+        args, _ = mock_client.request.call_args
+        assert args[0] == "POST"
+        assert args[1] == "/v1/flow"
+
+    def test_remote_backend_logs_each_call_to_client_log(
+        self, monkeypatch, tmp_path,
+    ):
+        from keep import mcp as mcp_mod
+        from keep.config import RemoteConfig
+
+        remote = RemoteConfig(
+            api_url="https://api.example.test", api_key="kn_test", project=None,
+        )
+        backend = mcp_mod._RemoteBackend(remote, log_dir=tmp_path)
+        try:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"ok": True}
+            mock_client.request.return_value = mock_response
+            backend._client = mock_client
+
+            backend.post("/v1/flow", {"state": "list"})
+            backend.get("/v1/notes/foo")
+        finally:
+            backend.close()
+
+        client_log = tmp_path / "keep-client.log"
+        assert client_log.exists()
+        body = client_log.read_text(encoding="utf-8")
+        assert "POST /v1/flow" in body
+        assert "GET /v1/notes/foo" in body
+        assert "status=200" in body
+        assert "host=https://api.example.test" in body
+
+    def test_remote_backend_get_returns_status_and_dict(self, monkeypatch, tmp_path):
+        """Remote backend matches the (status, dict) contract of the daemon backend."""
+        from keep import mcp as mcp_mod
+        from keep.config import RemoteConfig
+
+        remote = RemoteConfig(
+            api_url="https://api.example.test", api_key="kn_test", project=None,
+        )
+        backend = mcp_mod._RemoteBackend(remote, log_dir=tmp_path)
+        try:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 404
+            mock_response.json.side_effect = ValueError("not json")
+            mock_response.text = "not found"
+            mock_client.request.return_value = mock_response
+            backend._client = mock_client
+
+            status, body = backend.get("/v1/notes/missing")
+            assert status == 404
+            assert body == {"error": "not found"}
+        finally:
+            backend.close()
+
+    def test_remote_backend_rejects_non_https_url(self, tmp_path):
+        """Bearer tokens must not be sent over plain HTTP (except loopback)."""
+        from keep import mcp as mcp_mod
+        from keep.config import RemoteConfig
+
+        bad = RemoteConfig(
+            api_url="http://api.public.example/", api_key="kn_test", project=None,
+        )
+        with pytest.raises(ValueError, match="HTTPS"):
+            mcp_mod._RemoteBackend(bad, log_dir=tmp_path)
+
+    def test_remote_backend_allows_http_loopback(self, tmp_path):
+        """http://localhost is allowed for local-dev / smoke setups."""
+        from keep import mcp as mcp_mod
+        from keep.config import RemoteConfig
+
+        ok = RemoteConfig(
+            api_url="http://127.0.0.1:8080", api_key="kn_test", project=None,
+        )
+        backend = mcp_mod._RemoteBackend(ok, log_dir=tmp_path)
+        try:
+            assert backend._api_url == "http://127.0.0.1:8080"
+        finally:
+            backend.close()
+
+    def test_remote_backend_rejects_bad_project_slug(self, tmp_path):
+        """Malformed project slugs are caught before any HTTP request."""
+        from keep import mcp as mcp_mod
+        from keep.config import RemoteConfig
+
+        bad = RemoteConfig(
+            api_url="https://api.example.test", api_key="kn_test",
+            project="Bad_Slug!",
+        )
+        with pytest.raises(ValueError, match="Invalid project slug"):
+            mcp_mod._RemoteBackend(bad, log_dir=tmp_path)
+
+    def test_remote_backend_http_error_returns_zero_status(self, monkeypatch, tmp_path):
+        """Connection failures surface as status=0 instead of raising."""
+        import httpx
+        from keep import mcp as mcp_mod
+        from keep.config import RemoteConfig
+
+        remote = RemoteConfig(
+            api_url="https://api.example.test", api_key="kn_test", project=None,
+        )
+        backend = mcp_mod._RemoteBackend(remote, log_dir=tmp_path)
+        try:
+            mock_client = MagicMock()
+            mock_client.request.side_effect = httpx.ConnectError("refused")
+            backend._client = mock_client
+
+            status, body = backend.post("/v1/flow", {"state": "x"})
+            assert status == 0
+            assert "refused" in body["error"]
+        finally:
+            backend.close()

@@ -1528,19 +1528,34 @@ def _cleanup_stale_pytest_daemons():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_test_store_and_cleanup_daemons(monkeypatch, tmp_path):
+def _isolate_test_store_and_cleanup_daemons(request, monkeypatch, tmp_path):
     """Give each test its own store/config path and reap detached daemons.
 
     Subprocess CLI tests inherit these env vars, so daemon auto-start stays
     inside the test's temp tree instead of binding to a shared ~/.keep store.
     Any detached daemon that writes processor.pid under that tree is terminated
     during teardown.
+
+    ``smoke``-marked tests opt out of the local-only sandbox so they can hit
+    the live keep backend with the user's real credentials.
     """
+    is_smoke = "smoke" in request.keywords
     store = tmp_path / ".keep-test-store"
     store.mkdir()
     monkeypatch.setenv("KEEP_STORE_PATH", str(store))
     monkeypatch.setenv("KEEP_CONFIG", str(store))
-    monkeypatch.setenv("KEEP_LOCAL_ONLY", "1")
+    if not is_smoke:
+        monkeypatch.setenv("KEEP_LOCAL_ONLY", "1")
+        # Block any inherited hosted-service credentials from leaking into
+        # local-only tests. KEEP_LOCAL_ONLY suppresses these in load_config
+        # already, but the MCP backend selector and wizard short-circuit also
+        # check env vars directly.
+        for var in ("KEEPNOTES_API_URL", "KEEPNOTES_API_KEY", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+    else:
+        # Smoke tests need real credentials; KEEP_LOCAL_ONLY would short-circuit
+        # them on the wrong side.
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
     _write_test_store_config(store)
 
     yield
