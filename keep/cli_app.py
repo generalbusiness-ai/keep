@@ -7,7 +7,6 @@ import/export.
 """
 
 import atexit
-import base64
 import json
 import mimetypes
 import os
@@ -21,8 +20,8 @@ import subprocess as sp
 import tempfile
 import time as _time
 from pathlib import Path
-from typing import Annotated, Optional
-from urllib.parse import quote
+from typing import Annotated, Any, Optional
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import typer
 
@@ -39,7 +38,14 @@ from . import markdown_import as _markdown_import
 from . import markdown_mirrors as _markdown_mirrors
 from .config import RemoteConfig, StoreConfig, load_config, load_or_create_config
 from .daemon_client import get_port as _daemon_get_port
-from .const import DAEMON_PORT_FILE, DAEMON_TOKEN_FILE, STATE_PROMPT
+from .const import (
+    DAEMON_PORT_FILE,
+    DAEMON_TOKEN_FILE,
+    STATE_GET_CONTEXT,
+    STATE_PROMPT,
+    STATE_PUT,
+    STATE_TAG,
+)
 from .console_support import (
     _format_config_with_defaults,
     _get_config_value,
@@ -85,6 +91,22 @@ app = typer.Typer(
 _REMOTE_PORT = -1
 _remote_keeper = None
 _remote_keeper_key: tuple[str, str, str | None, str] | None = None
+_REMOTE_ANALYZE_FLOW = """
+match: sequence
+rules:
+  - id: analyzed
+    do: analyze
+    with:
+      id: "{params.id}"
+      tags: "{params.tags}"
+      force: "{params.force}"
+  - return:
+      status: done
+      with:
+        id: "{params.id}"
+        parts: "{analyzed.parts}"
+        skipped: "{analyzed.skipped}"
+""".strip()
 
 # Cache for _load_cli_remote(): key is the tuple of inputs that can change the
 # resolution (env vars + store override). A stable key collapses the read to a
@@ -255,6 +277,7 @@ def _guess_remote_upload_content_type(path: Path, data: bytes) -> str:
 
 
 def _remote_note_body(body: dict | None) -> dict | None:
+    """Normalize daemon put bodies into hosted flow ``put`` params."""
     if body is None:
         return None
     prepared = {k: v for k, v in body.items() if v is not None}
@@ -276,15 +299,232 @@ def _remote_note_body(body: dict | None) -> dict | None:
         if not path.is_file():
             raise ValueError(f"remote file upload requires a regular file: {path}")
         data = path.read_bytes()
+        content_type = _guess_remote_upload_content_type(path, data)
+        if not content_type.startswith("text/"):
+            raise ValueError(
+                "remote file upload through hosted flow currently supports "
+                "UTF-8 text files only; use an HTTP(S) URI for hosted binary "
+                "documents"
+            )
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"remote file upload requires UTF-8 text: {path}"
+            ) from exc
         prepared.setdefault("id", uri)
-        # The hosted API treats content, content_base64, and uri as mutually
-        # exclusive content sources. Use the original file URI as the default
-        # note identity, but do not send it as the source to fetch.
+        # Hosted flow cannot fetch a caller's local file path. Preserve the
+        # URI as the default identity, but send the file content through the
+        # public flow `put` content field.
         prepared.pop("uri", None)
-        prepared["content_base64"] = base64.b64encode(data).decode("ascii")
-        prepared["content_type"] = _guess_remote_upload_content_type(path, data)
+        prepared["content"] = content
 
     return prepared
+
+
+def _remote_note_path_id(route_path: str, *, suffix: str = "") -> str | None:
+    """Extract the encoded note ID from a daemon note route path."""
+    prefix = "/v1/notes/"
+    if not route_path.startswith(prefix):
+        return None
+    rest = route_path[len(prefix):]
+    if suffix:
+        if not rest.endswith(suffix):
+            return None
+        rest = rest[:-len(suffix)]
+    elif "/" in rest:
+        return None
+    if not rest or "/" in rest:
+        return None
+    return unquote(rest)
+
+
+def _remote_query_int(qs: dict[str, list[str]], key: str, default: int) -> int:
+    raw = qs.get(key, [default])[0]
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _remote_query_bool(qs: dict[str, list[str]], key: str, default: bool) -> bool:
+    raw = qs.get(key)
+    if not raw:
+        return default
+    value = str(raw[0]).strip().lower()
+    if value in {"0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    return default
+
+
+def _remote_flow_error(result: Any, state: str) -> tuple[int, dict] | None:
+    """Return an HTTP-shaped error when a flow did not finish cleanly."""
+    status = getattr(result, "status", None)
+    if status == "done":
+        return None
+    data = getattr(result, "data", None)
+    message = None
+    if isinstance(data, dict):
+        message = data.get("error") or data.get("reason")
+    return 400, {
+        "error": str(message or f"flow {state!r} returned status {status!r}"),
+        "status": status,
+    }
+
+
+def _remote_exception_response(exc: Exception) -> tuple[int, dict]:
+    if isinstance(exc, ValueError):
+        return 400, {"error": str(exc)}
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", 503)
+    return int(status or 503), {"error": str(exc)}
+
+
+def _remote_item_payload(item: Any) -> dict:
+    """Coerce dict/Item-like remote data to the daemon note JSON shape."""
+    if isinstance(item, dict):
+        tags = item.get("tags", {})
+        note = {
+            "id": str(item.get("id", "") or ""),
+            "summary": str(item.get("summary", "") or ""),
+            "tags": tags if isinstance(tags, dict) else {},
+        }
+        score = item.get("score")
+        if score is not None:
+            note["score"] = score
+        changed = item.get("changed")
+        if changed is not None:
+            note["changed"] = changed
+        return note
+    return _remote_item_to_note(item)
+
+
+def _remote_flow_item(result: Any, *names: str) -> dict:
+    bindings = getattr(result, "bindings", {}) or {}
+    data = getattr(result, "data", None) or {}
+    for name in names:
+        value = bindings.get(name) if isinstance(bindings, dict) else None
+        if isinstance(value, dict) and value.get("id"):
+            return _remote_item_payload(value)
+        value = data.get(name) if isinstance(data, dict) else None
+        if isinstance(value, dict) and value.get("id"):
+            return _remote_item_payload(value)
+    if isinstance(data, dict) and data.get("id"):
+        return _remote_item_payload(data)
+    return {}
+
+
+def _remote_bind_results(binding: Any) -> list[dict]:
+    if not isinstance(binding, dict):
+        return []
+    results = binding.get("results")
+    return results if isinstance(results, list) else []
+
+
+def _remote_context_from_flow_bindings(bindings: dict) -> dict | None:
+    """Map public `get` flow bindings back to ItemContext wire JSON."""
+    item = _remote_item_payload(bindings.get("item", {}))
+    if not item.get("id"):
+        return None
+
+    similar: list[dict] = []
+    for result in _remote_bind_results(bindings.get("similar", {})):
+        note = _remote_item_payload(result)
+        if not note.get("id"):
+            continue
+        tags = note.get("tags", {})
+        similar.append({
+            "id": tags.get("_base_id", note["id"]) if isinstance(tags, dict) else note["id"],
+            "offset": 0,
+            "score": note.get("score"),
+            "date": local_date((tags or {}).get("_updated") or (tags or {}).get("_created", "")),
+            "summary": note.get("summary", ""),
+        })
+
+    parts: list[dict] = []
+    for result in _remote_bind_results(bindings.get("parts", {})):
+        rid = str(result.get("id", "") if isinstance(result, dict) else "")
+        part_num = 0
+        if "@p" in rid:
+            try:
+                part_num = int(rid.rsplit("@p", 1)[1])
+            except ValueError:
+                part_num = 0
+        parts.append({
+            "part_num": part_num,
+            "summary": str(result.get("summary", "") if isinstance(result, dict) else ""),
+            "tags": result.get("tags", {}) if isinstance(result, dict) else {},
+        })
+
+    meta: dict[str, list[dict]] = {}
+    meta_binding = bindings.get("meta", {})
+    sections = meta_binding.get("sections", {}) if isinstance(meta_binding, dict) else {}
+    if isinstance(sections, dict):
+        for section, values in sections.items():
+            if not isinstance(values, list):
+                continue
+            meta[str(section)] = [
+                {
+                    "id": str(value.get("id", "")),
+                    "summary": str(value.get("summary", "")),
+                }
+                for value in values
+                if isinstance(value, dict)
+            ]
+
+    edges: dict[str, list[dict]] = {}
+    edge_binding = bindings.get("edges", {})
+    edge_groups = edge_binding.get("edges", {}) if isinstance(edge_binding, dict) else {}
+    if isinstance(edge_groups, dict):
+        for pred, values in edge_groups.items():
+            if not isinstance(values, list):
+                continue
+            edges[str(pred)] = [
+                {
+                    "source_id": str(value.get("id", value.get("source_id", ""))),
+                    "date": str(value.get("date", "")),
+                    "summary": str(value.get("summary", "")),
+                }
+                for value in values
+                if isinstance(value, dict)
+            ]
+
+    return {
+        "item": item,
+        "viewing_offset": 0,
+        "similar": similar,
+        "meta": meta,
+        "edges": edges,
+        "parts": parts,
+        "focus_part": None,
+        "expand_parts": False,
+        "prev": [],
+        "next": [],
+    }
+
+
+def _remote_context_versions_from_flow(result: Any) -> list[dict]:
+    """Extract version refs from the flow-backed list_versions state."""
+    bindings = getattr(result, "bindings", {}) or {}
+    data = getattr(result, "data", None) or {}
+    source = bindings.get("versions") if isinstance(bindings, dict) else None
+    if not isinstance(source, dict) and isinstance(data, dict):
+        source = data.get("versions")
+    rows = source.get("versions", []) if isinstance(source, dict) else []
+    if not isinstance(rows, list):
+        return []
+    refs: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        refs.append({
+            "offset": row.get("offset", 0),
+            "date": local_date(row.get("date", "")),
+            "summary": row.get("summary", ""),
+        })
+    return refs
 
 def _q(id: str) -> str:
     """URL-encode an ID for path segments."""
@@ -543,18 +783,28 @@ def _daemon_request(method: str, port: int, path: str, body: dict | None = None)
 
 
 def _remote_request(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
-    """Make a hosted REST API request for remote-mode CLI commands."""
+    """Translate daemon-shaped CLI calls onto the hosted flow contract."""
     keeper = _get_remote_keeper()
     if keeper is None:
         return 503, {"error": "remote backend is not configured"}
 
-    payload = body
-    if method.upper() == "POST" and path == "/v1/notes":
+    method = method.upper()
+    parsed = urlparse(path)
+    route_path = parsed.path
+
+    if method == "POST" and route_path == "/v1/notes":
         try:
-            payload = _remote_note_body(body)
+            params = _remote_note_body(body) or {}
+            result = keeper.run_flow(STATE_PUT, params=params, writable=True)
         except (OSError, ValueError) as exc:
             return 400, {"error": str(exc)}
-    elif method.upper() == "POST" and path == "/v1/search":
+        except Exception as exc:
+            return _remote_exception_response(exc)
+        if error := _remote_flow_error(result, STATE_PUT):
+            return error
+        return 200, _remote_flow_item(result, "stored", "item")
+
+    if method == "POST" and route_path == "/v1/search":
         params = body or {}
         try:
             items = keeper.find(
@@ -570,7 +820,7 @@ def _remote_request(method: str, path: str, body: dict | None = None) -> tuple[i
                 scope=params.get("scope"),
             )
         except Exception as exc:
-            return 503, {"error": str(exc)}
+            return _remote_exception_response(exc)
         return 200, {
             "notes": [_remote_item_to_note(item) for item in items],
             "deep_groups": [
@@ -581,22 +831,152 @@ def _remote_request(method: str, path: str, body: dict | None = None) -> tuple[i
                 for group_id, group_items in getattr(items, "deep_groups", {}).items()
             ],
         }
-    elif body is not None:
+
+    if method == "GET" and route_path.startswith("/v1/notes/"):
+        note_id = _remote_note_path_id(route_path)
+        if note_id is not None:
+            try:
+                item = keeper.get(note_id)
+            except Exception as exc:
+                return _remote_exception_response(exc)
+            if item is None:
+                return 404, {"error": "not found"}
+            return 200, _remote_item_payload(item)
+
+        note_id = _remote_note_path_id(route_path, suffix="/context")
+        if note_id is not None:
+            qs = parse_qs(parsed.query)
+            version = _remote_query_int(qs, "version", 0) if "version" in qs else 0
+            if version:
+                return 400, {
+                    "error": (
+                        "remote hosted flow context does not support version "
+                        "selectors yet"
+                    )
+                }
+            include_versions = _remote_query_bool(qs, "include_versions", True)
+            versions_limit = (
+                _remote_query_int(qs, "versions_limit", 3)
+                if include_versions
+                else 0
+            )
+            params: dict[str, Any] = {
+                "item_id": note_id,
+                "similar_limit": (
+                    _remote_query_int(qs, "similar_limit", 3)
+                    if _remote_query_bool(qs, "include_similar", True)
+                    else 0
+                ),
+                "meta_limit": (
+                    _remote_query_int(qs, "meta_limit", 3)
+                    if _remote_query_bool(qs, "include_meta", True)
+                    else 0
+                ),
+                "parts_limit": (
+                    _remote_query_int(qs, "parts_limit", 10)
+                    if _remote_query_bool(qs, "include_parts", True)
+                    else 0
+                ),
+                "edges_limit": _remote_query_int(qs, "edges_limit", 5),
+                "versions_limit": versions_limit,
+            }
+            try:
+                result = keeper.run_flow(
+                    STATE_GET_CONTEXT,
+                    params=params,
+                    writable=False,
+                )
+            except Exception as exc:
+                return _remote_exception_response(exc)
+            if error := _remote_flow_error(result, STATE_GET_CONTEXT):
+                return error
+            bindings = getattr(result, "bindings", {}) or {}
+            context = _remote_context_from_flow_bindings(bindings)
+            if context is None:
+                return 404, {"error": "not found"}
+            if versions_limit > 0:
+                try:
+                    version_result = keeper.run_flow(
+                        "list_versions",
+                        params={"item_id": note_id, "limit": versions_limit},
+                        writable=False,
+                    )
+                except Exception as exc:
+                    return _remote_exception_response(exc)
+                if error := _remote_flow_error(version_result, "list_versions"):
+                    return error
+                context["prev"] = _remote_context_versions_from_flow(version_result)
+            return 200, context
+
+    note_id = _remote_note_path_id(route_path, suffix="/tags")
+    if method == "PATCH" and note_id is not None:
+        payload = body or {}
+        params = {
+            "id": note_id,
+            "tags": payload.get("set"),
+            "remove": payload.get("remove"),
+            "remove_values": payload.get("remove_values"),
+        }
+        try:
+            result = keeper.run_flow(STATE_TAG, params=params, writable=True)
+        except Exception as exc:
+            return _remote_exception_response(exc)
+        if error := _remote_flow_error(result, STATE_TAG):
+            return error
+        note = _remote_flow_item(result, "tagged", "item")
+        return (200, note) if note.get("id") else (404, {"error": "not found"})
+
+    note_id = _remote_note_path_id(route_path)
+    if method == "DELETE" and note_id is not None:
+        try:
+            deleted = keeper.delete(note_id)
+        except Exception as exc:
+            return _remote_exception_response(exc)
+        return 200, {"deleted": bool(deleted)}
+
+    note_id = _remote_note_path_id(route_path, suffix="/analyze")
+    if method == "POST" and note_id is not None:
+        payload = body or {}
+        params = {
+            "id": note_id,
+            "force": bool(payload.get("force")),
+            "tags": payload.get("tags"),
+        }
+        try:
+            result = keeper.run_flow(
+                "compat-analyze",
+                params=params,
+                writable=True,
+                state_doc_yaml=_REMOTE_ANALYZE_FLOW,
+            )
+        except Exception as exc:
+            return _remote_exception_response(exc)
+        if getattr(result, "status", None) == "async":
+            return 202, {"id": note_id, "queued": True, "status": "queued"}
+        if error := _remote_flow_error(result, "compat-analyze"):
+            return error
+        data = getattr(result, "data", None) or {}
+        if isinstance(data, dict):
+            return 200, data
+        return 200, {"id": note_id}
+
+    payload = body
+    if body is not None:
         payload = {k: v for k, v in body.items() if v is not None}
 
     start = _time.monotonic()
     try:
         response = keeper._client.request(
-            method.upper(),
+            method,
             path,
             json=payload if payload is not None else None,
         )
     except Exception as exc:
-        return 503, {"error": str(exc)}
+        return _remote_exception_response(exc)
 
     try:
         keeper._log_call(
-            method.upper(),
+            method,
             path,
             response.status_code,
             int((_time.monotonic() - start) * 1000),
@@ -614,6 +994,8 @@ def _remote_request(method: str, path: str, body: dict | None = None) -> tuple[i
 
 
 def _remote_item_to_note(item) -> dict:
+    if isinstance(item, dict):
+        return _remote_item_payload(item)
     note = {
         "id": getattr(item, "id", ""),
         "summary": getattr(item, "summary", ""),

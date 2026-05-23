@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "keep prompt session-start --auto-scope -t 'session=${.session_id}' 2>/dev/null || echo 'keep warning: session-start hook failed. Check that the embedding provider is available (e.g. ollama serve).'",
+            "command": "keep prompt session-start --auto-scope -t 'session=${.session_id}' || echo 'keep warning: session-start hook failed; see keep error above.' >&2",
             "statusMessage": "Reflecting..."
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "keep now 'User prompt: ${.prompt|text}' --truncate --auto-scope -t 'session=${.session_id}' 2>/dev/null || echo 'keep warning: memory not recorded — embedding provider unavailable. Run: ollama serve'",
+            "command": "keep now 'User prompt: ${.prompt|text}' --truncate --auto-scope -t 'session=${.session_id}' || echo 'keep warning: memory not recorded; see keep error above.' >&2",
             "statusMessage": "Reflecting..."
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "keep prompt subagent-start --auto-scope -t 'session=${.session_id}' 2>/dev/null || echo 'keep warning: subagent-start hook failed. Check that the embedding provider is available (e.g. ollama serve).'",
+            "command": "keep prompt subagent-start --auto-scope -t 'session=${.session_id}' || echo 'keep warning: subagent-start hook failed; see keep error above.' >&2",
             "statusMessage": "Loading context..."
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "keep now 'Assistant response: ${.last_assistant_message}' --truncate --auto-scope --quiet -t 'session=${.session_id}' >/dev/null 2>&1 || echo 'keep warning: memory not recorded — embedding provider unavailable. Run: ollama serve' >&2; echo '{}'",
+            "command": "keep now 'Assistant response: ${.last_assistant_message}' --truncate --auto-scope --quiet -t 'session=${.session_id}' >/dev/null || echo 'keep warning: memory not recorded; see keep error above.' >&2; echo '{}'",
             "statusMessage": "Reflecting..."
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "keep now 'Subagent response: ${.last_assistant_message}' --truncate --auto-scope --quiet -t 'session=${.session_id}' >/dev/null 2>&1 || echo 'keep warning: memory not recorded — embedding provider unavailable. Run: ollama serve' >&2; echo '{}'",
+            "command": "keep now 'Subagent response: ${.last_assistant_message}' --truncate --auto-scope --quiet -t 'session=${.session_id}' >/dev/null || echo 'keep warning: memory not recorded; see keep error above.' >&2; echo '{}'",
             "statusMessage": "Reflecting..."
           }
         ]

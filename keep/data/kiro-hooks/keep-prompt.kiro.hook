@@ -8,6 +8,6 @@
   },
   "then": {
     "type": "runCommand",
-    "command": "printf 'User: %s' \"$USER_PROMPT\" | keep now -t type=conversation 2>/dev/null || true"
+    "command": "printf 'User: %s' \"$USER_PROMPT\" | keep now -t type=conversation || echo 'keep warning: memory not recorded; see keep error above.' >&2"
   }
 }

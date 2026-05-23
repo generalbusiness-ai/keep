@@ -909,9 +909,55 @@ class TestHookConversationTags:
         ]
         assert any("type=conversation" in cmd for cmd in commands)
 
+    def test_installed_claude_hooks_pass_through_keep_stderr(self):
+        """Installed hooks must not hide the real keep error or blame Ollama."""
+        from keep.integrations import CLAUDE_CODE_HOOKS
+
+        commands = [
+            h["command"]
+            for entries in CLAUDE_CODE_HOOKS.values()
+            for entry in entries
+            for h in entry.get("hooks", [])
+        ]
+
+        assert commands
+        assert all("ollama serve" not in cmd for cmd in commands)
+        assert all("embedding provider unavailable" not in cmd for cmd in commands)
+        assert all("2>/dev/null" not in cmd for cmd in commands)
+        assert all("2>&1" not in cmd for cmd in commands)
+        assert any("see keep error above" in cmd for cmd in commands)
+
+    def test_plugin_claude_hooks_pass_through_keep_stderr(self):
+        """The distributable plugin hook JSON follows the same fallback rule."""
+        hook_file = Path(__file__).parent.parent / "claude-code-plugin" / "hooks" / "hooks.json"
+        data = json.loads(hook_file.read_text())
+        commands = [
+            h["command"]
+            for entries in data["hooks"].values()
+            for entry in entries
+            for h in entry.get("hooks", [])
+        ]
+
+        assert commands
+        assert all("ollama serve" not in cmd for cmd in commands)
+        assert all("embedding provider unavailable" not in cmd for cmd in commands)
+        assert all("2>/dev/null" not in cmd for cmd in commands)
+        assert all("2>&1" not in cmd for cmd in commands)
+        assert any("see keep error above" in cmd for cmd in commands)
+
     def test_kiro_hook_includes_type_conversation(self):
         """Kiro promptSubmit hook command tags with type=conversation."""
         from pathlib import Path
         hook_file = Path(__file__).parent.parent / "keep" / "data" / "kiro-hooks" / "keep-prompt.kiro.hook"
         content = hook_file.read_text()
         assert "type=conversation" in content
+        assert "2>/dev/null" not in content
+        assert "see keep error above" in content
+
+    def test_kiro_spawn_hook_uses_valid_get_command(self):
+        """Kiro agent-spawn hook must call a real CLI option set."""
+        hook_file = Path(__file__).parent.parent / "keep" / "data" / "kiro-hooks" / "keep-spawn.kiro.hook"
+        content = hook_file.read_text()
+        assert "keep get now -n 10" in content
+        assert "keep now -n" not in content
+        assert "2>/dev/null" not in content

@@ -8,6 +8,6 @@
   },
   "then": {
     "type": "runCommand",
-    "command": "keep now -n 10 </dev/null 2>/dev/null || true"
+    "command": "keep get now -n 10 </dev/null || echo 'keep warning: context load failed; see keep error above.' >&2"
   }
 }

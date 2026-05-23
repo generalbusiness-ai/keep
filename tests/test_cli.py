@@ -7,7 +7,6 @@ Tests verify:
 4. Human-readable output is line-oriented (for grep/wc/etc.)
 """
 
-import base64
 import json
 import os
 import subprocess
@@ -940,37 +939,89 @@ class TestPutDirectory:
 
     def _fake_remote_keeper(self, monkeypatch, calls: list[tuple[str, str, dict | None]]):
         from keep import cli_app
-
-        class FakeResponse:
-            def __init__(self, status_code: int, data: dict):
-                self.status_code = status_code
-                self._data = data
-                self.text = json.dumps(data)
-                self.reason_phrase = "OK" if status_code < 400 else "error"
-
-            def json(self):
-                return self._data
+        from keep.types import Item
 
         class FakeClient:
             def request(self, method, path, json=None):
                 calls.append((method, path, json))
-                if method == "GET" and path.startswith("/v1/notes/.ignore"):
-                    return FakeResponse(404, {"detail": "not found"})
-                if method == "POST" and path == "/v1/notes":
-                    return FakeResponse(200, {
-                        "id": (
-                            (json or {}).get("id")
-                            or (json or {}).get("uri")
-                            or f"remote-{len(calls)}"
-                        ),
-                        "summary": "",
-                        "tags": (json or {}).get("tags") or {},
-                    })
-                return FakeResponse(200, {})
+                if path != "/v1/flow":
+                    raise AssertionError(f"hosted remote must use /v1/flow, got {method} {path}")
+                return SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {"status": "done", "bindings": {}, "data": {}},
+                    text="{}",
+                    reason_phrase="OK",
+                )
 
         class FakeRemoteKeeper:
             def __init__(self):
                 self._client = FakeClient()
+
+            def run_flow(
+                self, state, *, params=None, budget=None, cursor_token=None,
+                state_doc_yaml=None, writable=True,
+            ):
+                payload = {
+                    "state": state,
+                    "params": {k: v for k, v in (params or {}).items() if v is not None},
+                    "writable": writable,
+                }
+                if state_doc_yaml is not None:
+                    payload["state_doc_yaml"] = state_doc_yaml
+                calls.append(("POST", "/v1/flow", payload))
+                if state == "put":
+                    p = payload["params"]
+                    item = {
+                        "id": p.get("id") or p.get("uri") or f"remote-{len(calls)}",
+                        "summary": p.get("content", "")[:80],
+                        "tags": p.get("tags") or {},
+                    }
+                    return FlowResult(status="done", bindings={"stored": item}, data={"stored": item})
+                if state == "get":
+                    item_id = payload["params"].get("item_id", "now")
+                    item = {"id": item_id, "summary": f"context for {item_id}", "tags": {}}
+                    return FlowResult(status="done", bindings={"item": item}, data=None)
+                if state == "tag":
+                    item = {
+                        "id": payload["params"].get("id", ""),
+                        "summary": "",
+                        "tags": payload["params"].get("tags") or {},
+                    }
+                    return FlowResult(status="done", bindings={"tagged": item}, data={"tagged": item})
+                if state == "compat-analyze":
+                    return FlowResult(
+                        status="async",
+                        bindings={},
+                        data={"reason": "async_action", "action": "analyze"},
+                        cursor="cursor",
+                    )
+                return FlowResult(status="done", bindings={}, data={})
+
+            def get(self, id):
+                calls.append((
+                    "POST",
+                    "/v1/flow",
+                    {
+                        "state": "compat-get-item",
+                        "params": {"id": id},
+                        "writable": False,
+                    },
+                ))
+                if id == ".ignore":
+                    return None
+                return Item(id=id, summary=f"remote {id}", tags={})
+
+            def delete(self, id, *, delete_versions=True):
+                calls.append((
+                    "POST",
+                    "/v1/flow",
+                    {
+                        "state": "delete",
+                        "params": {"id": id, "delete_versions": delete_versions},
+                        "writable": True,
+                    },
+                ))
+                return True
 
             def _log_call(self, *args, **kwargs):
                 pass
@@ -1185,14 +1236,17 @@ class TestPutDirectory:
         )
 
         assert result.exit_code == 0, result.output
-        note_posts = [body for method, path, body in calls if method == "POST" and path == "/v1/notes"]
+        note_posts = [
+            body["params"] for method, path, body in calls
+            if method == "POST" and path == "/v1/flow" and body["state"] == "put"
+        ]
         assert len(note_posts) == 1
         body = note_posts[0]
         assert body is not None
         assert body["id"] == "uploaded"
         assert "uri" not in body
-        assert body["content_type"] == "text/plain"
-        assert base64.b64decode(body["content_base64"]).decode() == "hosted file body"
+        assert body["content"] == "hosted file body"
+        assert all(path == "/v1/flow" for _method, path, _body in calls)
 
     def test_remote_put_file_without_id_uses_file_uri_identity(self, tmp_path, monkeypatch):
         """Remote uploads keep URI-mode ID semantics when --id is omitted."""
@@ -1217,14 +1271,18 @@ class TestPutDirectory:
         )
 
         assert result.exit_code == 0, result.output
-        note_posts = [body for method, path, body in calls if method == "POST" and path == "/v1/notes"]
+        note_posts = [
+            body["params"] for method, path, body in calls
+            if method == "POST" and path == "/v1/flow" and body["state"] == "put"
+        ]
         assert len(note_posts) == 1
         body = note_posts[0]
         file_uri = f"file://{source.resolve()}"
         assert body is not None
         assert body["id"] == file_uri
         assert "uri" not in body
-        assert base64.b64decode(body["content_base64"]).decode() == "hosted file body"
+        assert body["content"] == "hosted file body"
+        assert all(path == "/v1/flow" for _method, path, _body in calls)
 
     def test_remote_put_directory_uploads_files_and_skips_local_git_enqueue(
         self, tmp_path, monkeypatch,
@@ -1254,9 +1312,12 @@ class TestPutDirectory:
         )
 
         assert result.exit_code == 0, result.output
-        note_posts = [body for method, path, body in calls if method == "POST" and path == "/v1/notes"]
+        note_posts = [
+            body["params"] for method, path, body in calls
+            if method == "POST" and path == "/v1/flow" and body["state"] == "put"
+        ]
         assert len(note_posts) == 2
-        decoded = sorted(base64.b64decode(body["content_base64"]).decode() for body in note_posts)
+        decoded = sorted(body["content"] for body in note_posts)
         assert decoded == ["alpha", "bravo"]
         assert all("uri" not in body for body in note_posts)
         assert sorted(body["id"] for body in note_posts) == [
@@ -1265,6 +1326,84 @@ class TestPutDirectory:
         ]
         assert all(body["tags"] == {"project": "remote"} for body in note_posts)
         assert all(not body.get("enqueue_git") for body in note_posts)
+        assert all(path == "/v1/flow" for _method, path, _body in calls)
+
+    def test_remote_now_write_and_context_use_flow_contract(self, tmp_path, monkeypatch):
+        """Hosted now writes and reads translate to /v1/flow, never /v1/notes."""
+        from keep import cli_app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        self._write_remote_config(store)
+        calls: list[tuple[str, str, dict | None]] = []
+        self._fake_remote_keeper(monkeypatch, calls)
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+
+        result = CliRunner().invoke(
+            app,
+            ["--store", str(store), "now", "User prompt: hello", "--truncate"],
+            catch_exceptions=False,
+            terminal_width=120,
+        )
+
+        assert result.exit_code == 0, result.output
+        flow_calls = [
+            body for method, path, body in calls
+            if method == "POST" and path == "/v1/flow"
+        ]
+        assert flow_calls[0]["state"] == "put"
+        assert flow_calls[0]["params"] == {"content": "User prompt: hello", "id": "now"}
+        assert flow_calls[1]["state"] == "get"
+        assert flow_calls[1]["params"]["item_id"] == "now"
+        assert "context for now" in result.stdout
+        assert all(path == "/v1/flow" for _method, path, _body in calls)
+
+    def test_remote_get_tag_delete_and_analyze_map_to_flow(self, monkeypatch):
+        """The remaining daemon-style note routes are hosted flow adapters."""
+        from keep import cli_app
+
+        calls: list[tuple[str, str, dict | None]] = []
+        self._fake_remote_keeper(monkeypatch, calls)
+
+        status, note = cli_app._remote_request("GET", "/v1/notes/doc-1")
+        assert status == 200
+        assert note["id"] == "doc-1"
+
+        status, tagged = cli_app._remote_request(
+            "PATCH",
+            "/v1/notes/doc-1/tags",
+            {"set": {"topic": "remote"}, "remove": ["old"]},
+        )
+        assert status == 200
+        assert tagged["tags"] == {"topic": "remote"}
+
+        status, deleted = cli_app._remote_request("DELETE", "/v1/notes/doc-1")
+        assert status == 200
+        assert deleted == {"deleted": True}
+
+        status, analyzed = cli_app._remote_request(
+            "POST",
+            "/v1/notes/doc-1/analyze",
+            {"force": True, "tags": ["topic"]},
+        )
+        assert status == 202
+        assert analyzed == {"id": "doc-1", "queued": True, "status": "queued"}
+
+        states = [body["state"] for _method, _path, body in calls]
+        assert states == ["compat-get-item", "tag", "delete", "compat-analyze"]
+        assert calls[1][2]["params"] == {
+            "id": "doc-1",
+            "tags": {"topic": "remote"},
+            "remove": ["old"],
+        }
+        assert calls[3][2]["params"] == {
+            "id": "doc-1",
+            "force": True,
+            "tags": ["topic"],
+        }
+        assert all(path == "/v1/flow" for _method, path, _body in calls)
 
     def test_remote_put_watch_is_rejected_without_daemon(self, tmp_path, monkeypatch):
         """Remote mode must not fall back to local watch/pending behavior."""

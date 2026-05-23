@@ -53,7 +53,7 @@ keep_help(topic="flow-actions")                                                 
 """
 
 # Bump this when hook definitions change — triggers re-install for existing users
-HOOKS_VERSION = 13
+HOOKS_VERSION = 14
 
 # Claude Code plugin marketplace URL
 CLAUDE_CODE_MARKETPLACE_URL = "https://github.com/generalbusiness-ai/keep.git"
@@ -67,7 +67,7 @@ CLAUDE_CODE_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "keep prompt session-start </dev/null 2>/dev/null || true",
+                    "command": "keep prompt session-start </dev/null || echo 'keep warning: session-start hook failed; see keep error above.' >&2",
                     "statusMessage": "Reflecting...",
                 }
             ],
@@ -78,7 +78,7 @@ CLAUDE_CODE_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "keep now 'User: ${.prompt|text}' --truncate -t type=conversation 2>/dev/null || true",
+                    "command": "keep now 'User: ${.prompt|text}' --truncate -t type=conversation || echo 'keep warning: memory not recorded; see keep error above.' >&2",
                     "statusMessage": "Reflecting...",
                 }
             ],
@@ -89,7 +89,7 @@ CLAUDE_CODE_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "keep prompt subagent-start </dev/null 2>/dev/null || true",
+                    "command": "keep prompt subagent-start </dev/null || echo 'keep warning: subagent-start hook failed; see keep error above.' >&2",
                     "statusMessage": "Loading context...",
                 }
             ],
@@ -100,7 +100,7 @@ CLAUDE_CODE_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "jq -r '.session_id // empty' 2>/dev/null | xargs -I{} keep move session-{} -t session={} 2>/dev/null || true",
+                    "command": "jq -r '.session_id // empty' | xargs -I{} keep move session-{} -t session={} || echo 'keep warning: session-end hook failed; see keep error above.' >&2",
                 }
             ],
         }
