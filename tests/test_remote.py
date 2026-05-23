@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -173,3 +174,257 @@ def test_get_keeper_env_key_overlays_store_toml_remote(tmp_path, monkeypatch):
     assert keeper.api_key == "kn_env_only"
     assert keeper.project == "from-file"
     assert keeper.config.config_dir == store
+
+
+def test_validate_remote_api_url_returns_normalized_string():
+    """validate_remote_api_url must return the URL (regression: silent None)."""
+    from keep.remote import validate_remote_api_url
+
+    assert validate_remote_api_url("https://api.example.test/") == "https://api.example.test"
+    assert validate_remote_api_url("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+
+
+class TestResolveRemoteConfig:
+    """Single source of truth for env-over-TOML remote resolution."""
+
+    def test_returns_none_when_keep_local_only(self, monkeypatch):
+        from keep.remote import resolve_remote_config
+
+        monkeypatch.setenv("KEEP_LOCAL_ONLY", "1")
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+        assert resolve_remote_config(None) is None
+
+    def test_returns_none_when_no_credentials_anywhere(self, monkeypatch):
+        from keep.remote import resolve_remote_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        for var in ("KEEPNOTES_API_URL", "KEEPNOTES_API_KEY", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+        assert resolve_remote_config(None) is None
+
+    def test_env_only_returns_remote_with_default_api_url(self, monkeypatch):
+        from keep.remote import resolve_remote_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+        monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env")
+        remote = resolve_remote_config(None)
+        assert remote is not None
+        assert remote.api_url == "https://api.keepnotes.ai"
+        assert remote.api_key == "kn_env"
+        assert remote.project is None
+
+    def test_env_overlays_toml_per_field(self, monkeypatch):
+        """KEEPNOTES_API_KEY alone keeps TOML api_url/project."""
+        from keep.config import RemoteConfig, StoreConfig
+        from keep.remote import resolve_remote_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+        monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env")
+        config = StoreConfig(
+            path=Path("/tmp"),
+            remote_persist=RemoteConfig(
+                api_url="https://config.example.test",
+                api_key="kn_file",
+                project="from-file",
+            ),
+        )
+        remote = resolve_remote_config(config)
+        assert remote.api_url == "https://config.example.test"
+        assert remote.api_key == "kn_env"
+        assert remote.project == "from-file"
+
+    def test_toml_only_returns_persisted_values(self, monkeypatch):
+        from keep.config import RemoteConfig, StoreConfig
+        from keep.remote import resolve_remote_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        for var in ("KEEPNOTES_API_URL", "KEEPNOTES_API_KEY", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+        config = StoreConfig(
+            path=Path("/tmp"),
+            remote_persist=RemoteConfig(
+                api_url="https://config.example.test",
+                api_key="kn_file",
+                project="from-file",
+            ),
+        )
+        remote = resolve_remote_config(config)
+        assert remote.api_url == "https://config.example.test"
+        assert remote.api_key == "kn_file"
+        assert remote.project == "from-file"
+
+    def test_prefers_remote_persist_over_remote(self, monkeypatch):
+        """The on-disk view (remote_persist) wins over an already-overlaid remote."""
+        from keep.config import RemoteConfig, StoreConfig
+        from keep.remote import resolve_remote_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        for var in ("KEEPNOTES_API_URL", "KEEPNOTES_API_KEY", "KEEPNOTES_PROJECT"):
+            monkeypatch.delenv(var, raising=False)
+        config = StoreConfig(
+            path=Path("/tmp"),
+            remote=RemoteConfig(
+                api_url="https://overlaid.example.test",
+                api_key="kn_overlaid",
+                project=None,
+            ),
+            remote_persist=RemoteConfig(
+                api_url="https://persisted.example.test",
+                api_key="kn_persisted",
+                project="persisted-proj",
+            ),
+        )
+        remote = resolve_remote_config(config)
+        # remote_persist values take precedence over already-overlaid config.remote.
+        assert remote.api_url == "https://persisted.example.test"
+        assert remote.api_key == "kn_persisted"
+        assert remote.project == "persisted-proj"
+
+
+def test_all_call_sites_use_shared_resolver(monkeypatch):
+    """Every site that decides "go remote?" must go through resolve_remote_config.
+
+    The helper is imported by name at module load (cli_app) or via local
+    import (mcp, setup_wizard, console_support), so we patch wherever each
+    site looks it up and verify the call passes through.
+    """
+    from keep import cli_app, mcp, setup_wizard
+    from keep.config import StoreConfig
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_test")
+
+    sentinel_calls: list[str] = []
+
+    def fake_resolver(config):
+        sentinel_calls.append("called")
+        return None  # Force the no-remote path in every caller.
+
+    # Patch both the canonical location and the names imported at module
+    # load. If a future call site is added that re-implements the overlay
+    # rule inline, the per-site assertion below will not increment and the
+    # test fails.
+    monkeypatch.setattr("keep.remote.resolve_remote_config", fake_resolver)
+    monkeypatch.setattr("keep.cli_app.resolve_remote_config", fake_resolver)
+
+    # MCP: imported locally inside _load_remote_config.
+    mcp._backend = None
+    try:
+        mcp._load_remote_config()
+    finally:
+        mcp._backend = None
+    assert len(sentinel_calls) >= 1
+
+    # CLI: imported at module load.
+    cli_app._invalidate_cli_remote_cache()
+    before = len(sentinel_calls)
+    cli_app._compute_cli_remote()
+    assert len(sentinel_calls) > before
+
+    # Wizard: imported locally inside _detect_remote_config.
+    before = len(sentinel_calls)
+    setup_wizard._detect_remote_config(StoreConfig(path=Path("/tmp")))
+    assert len(sentinel_calls) > before
+
+
+def test_get_keeper_env_only_marks_config_as_env_sourced(tmp_path, monkeypatch):
+    """No TOML [remote] + env credentials ⇒ remote_persist=None, remote_from_env=True.
+
+    Aligns _get_keeper's resolution with load_config's contract so that a
+    later save_config() through this Keeper never writes env-sourced
+    credentials back to disk.
+    """
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_test_store_config(store)  # no [remote] section appended
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEP_CONFIG", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+    monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
+    monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env_only")
+
+    class FakeRemoteKeeper:
+        def __init__(self, api_url, api_key, config, *, project=None):
+            self.api_url = api_url
+            self.api_key = api_key
+            self.config = config
+            self.project = project
+
+        def close(self):
+            pass
+
+    with (
+        patch(
+            "keep.api.Keeper",
+            side_effect=AssertionError("local Keeper must not be constructed"),
+        ),
+        patch("keep.remote.RemoteKeeper", FakeRemoteKeeper),
+    ):
+        from keep.console_support import _get_keeper
+
+        keeper = _get_keeper(store)
+
+    assert keeper.api_key == "kn_env_only"
+    # Critical: the resolved config must declare this as env-sourced so a
+    # subsequent save_config() preserves an empty on-disk [remote].
+    assert keeper.config.remote_persist is None
+    assert keeper.config.remote_from_env is True
+
+
+def test_get_keeper_toml_remote_preserves_persisted_credentials(tmp_path, monkeypatch):
+    """TOML [remote] + env overlay ⇒ remote_persist=TOML, remote_from_env=False.
+
+    Even with env vars overlaying api_key, the persisted snapshot must point
+    at the file's values so save_config() keeps the [remote] section intact.
+    """
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_test_store_config(store)
+    with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+        fh.write(
+            "\n[remote]\n"
+            "api_url = \"https://config.example.test\"\n"
+            "api_key = \"kn_file\"\n"
+            "project = \"from-file\"\n"
+        )
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEP_CONFIG", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+    monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
+    monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env_only")
+
+    class FakeRemoteKeeper:
+        def __init__(self, api_url, api_key, config, *, project=None):
+            self.api_url = api_url
+            self.api_key = api_key
+            self.config = config
+            self.project = project
+
+        def close(self):
+            pass
+
+    with (
+        patch(
+            "keep.api.Keeper",
+            side_effect=AssertionError("local Keeper must not be constructed"),
+        ),
+        patch("keep.remote.RemoteKeeper", FakeRemoteKeeper),
+    ):
+        from keep.console_support import _get_keeper
+
+        keeper = _get_keeper(store)
+
+    # Runtime credentials use the env overlay.
+    assert keeper.api_key == "kn_env_only"
+    # Persisted snapshot matches the TOML file, not the env value.
+    assert keeper.config.remote_persist is not None
+    assert keeper.config.remote_persist.api_key == "kn_file"
+    assert keeper.config.remote_persist.api_url == "https://config.example.test"
+    assert keeper.config.remote_persist.project == "from-file"
+    assert keeper.config.remote_from_env is False

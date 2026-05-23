@@ -1528,6 +1528,30 @@ def _cleanup_stale_pytest_daemons():
 
 
 @pytest.fixture(autouse=True)
+def _reset_cli_module_caches():
+    """Reset cli_app module-level state before and after each test.
+
+    The CLI keeps process-wide caches (``_remote_keeper`` /
+    ``_remote_keeper_key`` and the ``_load_cli_remote()`` resolver cache) so
+    a single CLI invocation does not re-open the remote backend or re-read
+    keep.toml repeatedly. In tests these would otherwise leak across cases
+    if any test forgets to monkeypatch them, so we clear them on both ends.
+    """
+    from keep import cli_app
+
+    def _reset():
+        cli_app._remote_keeper = None
+        cli_app._remote_keeper_key = None
+        cli_app._invalidate_cli_remote_cache()
+
+    _reset()
+    try:
+        yield
+    finally:
+        _reset()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_test_store_and_cleanup_daemons(request, monkeypatch, tmp_path):
     """Give each test its own store/config path and reap detached daemons.
 

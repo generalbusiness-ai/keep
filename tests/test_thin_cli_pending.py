@@ -258,3 +258,22 @@ def test_load_cli_remote_is_cached_across_calls(tmp_path, monkeypatch):
     assert calls["n"] == 2
 
     cli_app._invalidate_cli_remote_cache()
+
+
+def test_cli_module_caches_are_reset_between_tests_part_a():
+    """Poison cli_app module caches to prove the autouse fixture clears them.
+
+    Part b then asserts that the leaked state is gone.
+    """
+    cli_app._remote_keeper = "LEAKED_KEEPER"
+    cli_app._remote_keeper_key = ("leak", "leak", None, "leak")
+    cli_app._cli_remote_cache_key = ("leak",)
+    cli_app._cli_remote_cache_value = "LEAKED_VALUE"
+
+
+def test_cli_module_caches_are_reset_between_tests_part_b():
+    """If part_a's poison leaks, these assertions will fail."""
+    assert cli_app._remote_keeper is None
+    assert cli_app._remote_keeper_key is None
+    assert cli_app._cli_remote_cache_key is None
+    assert cli_app._cli_remote_cache_value is None

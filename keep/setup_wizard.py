@@ -523,30 +523,11 @@ def run_wizard(
 def _detect_remote_config(existing: Optional[StoreConfig]) -> Optional[RemoteConfig]:
     """Find an already-configured remote backend.
 
-    Resolution is per-field: env values override the on-disk TOML values one
-    field at a time. That way a user with only ``KEEPNOTES_API_KEY`` exported
-    still inherits ``api_url`` / ``project`` from their keep.toml.
+    Thin wrapper over ``keep.remote.resolve_remote_config`` so the env-over-TOML
+    overlay rule lives in exactly one place.
     """
-    env_url = os.environ.get("KEEPNOTES_API_URL")
-    env_key = os.environ.get("KEEPNOTES_API_KEY")
-    env_project = os.environ.get("KEEPNOTES_PROJECT")
-
-    # Prefer the persisted TOML view (untouched by env overlay) when present.
-    toml_remote: Optional[RemoteConfig] = None
-    if existing is not None:
-        toml_remote = getattr(existing, "remote_persist", None) or existing.remote
-
-    if not env_key and toml_remote is None:
-        return None
-
-    api_url = env_url or (toml_remote.api_url if toml_remote else None) \
-        or "https://api.keepnotes.ai"
-    api_key = env_key or (toml_remote.api_key if toml_remote else None)
-    project = env_project or (toml_remote.project if toml_remote else None)
-
-    if not api_key:
-        return None
-    return RemoteConfig(api_url=api_url, api_key=api_key, project=project or None)
+    from .remote import resolve_remote_config
+    return resolve_remote_config(existing)
 
 
 def _verify_remote(remote: RemoteConfig) -> tuple[bool, str]:

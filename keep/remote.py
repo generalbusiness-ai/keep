@@ -73,6 +73,56 @@ def validate_remote_api_url(api_url: str) -> str:
     return url
 
 
+def resolve_remote_config(config: Optional[StoreConfig]) -> Optional["RemoteConfig"]:
+    """Compute the effective RemoteConfig given a (possibly loaded) StoreConfig.
+
+    Single source of truth for the env-over-TOML overlay rule used by every
+    caller that needs to decide "do we route this process through the hosted
+    backend, and with what credentials?". Resolution order, per field:
+
+        api_url    KEEPNOTES_API_URL    > config.remote_persist.api_url    > https://api.keepnotes.ai
+        api_key    KEEPNOTES_API_KEY    > config.remote_persist.api_key    (required)
+        project    KEEPNOTES_PROJECT    > config.remote_persist.project
+
+    The function returns None when ``KEEP_LOCAL_ONLY`` is set in the
+    environment or when no ``api_key`` is available from either source.
+
+    Preferring ``config.remote_persist`` (the on-disk view) over the
+    already-overlaid ``config.remote`` means callers who pre-loaded a
+    StoreConfig still get the same field-by-field merge — and a caller that
+    constructs a StoreConfig by hand (wizard, console_support fallback)
+    still resolves correctly as long as it sets ``remote_persist``.
+    """
+    # Local import to avoid a circular dependency: keep.config imports from
+    # keep.remote at module import time would create a cycle since remote.py
+    # already imports StoreConfig at module scope.
+    from .config import RemoteConfig
+
+    if os.environ.get("KEEP_LOCAL_ONLY"):
+        return None
+
+    toml_remote: Optional[RemoteConfig] = None
+    if config is not None:
+        toml_remote = config.remote_persist or config.remote
+
+    env_url = os.environ.get("KEEPNOTES_API_URL")
+    env_key = os.environ.get("KEEPNOTES_API_KEY")
+    env_project = os.environ.get("KEEPNOTES_PROJECT")
+
+    api_url = (
+        env_url
+        or (toml_remote.api_url if toml_remote else None)
+        or "https://api.keepnotes.ai"
+    )
+    api_key = env_key or (toml_remote.api_key if toml_remote else None)
+    project = env_project or (toml_remote.project if toml_remote else None)
+
+    if not api_key:
+        return None
+    return RemoteConfig(api_url=api_url, api_key=api_key, project=project or None)
+    return url
+
+
 class RemoteKeeper:
     """Flow-host client backed by the keep HTTP API."""
 

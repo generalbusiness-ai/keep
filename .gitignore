@@ -65,6 +65,11 @@ chroma/
 test_extraction_store/
 .DS_Store
 .claude/settings.local.json
+# Local Claude Code skill symlinks + lock file land here when a workspace
+# uses the per-project skill installer. They point at out-of-tree state in
+# .agents/ and should never be committed.
+.claude/skills/
+skills-lock.json
 .agents/
 documents.db
 keep-ops.log

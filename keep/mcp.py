@@ -199,48 +199,27 @@ class _RemoteBackend(_MCPBackend):
 
 
 def _load_remote_config() -> tuple[Optional[RemoteConfig], Optional[Any]]:
-    """Detect remote-backend config from env vars layered over keep.toml.
+    """Detect remote-backend config and where to write the client log.
 
-    Returns (remote_config_or_None, config_dir_for_logging). The config_dir
-    is the directory containing keep.toml (used for the client log location).
-
-    Resolution order, per field (api_url, api_key, project):
-        env var  >  keep.toml [remote]  >  bundled default (api_url only)
-
-    Honors KEEP_LOCAL_ONLY so tests and constrained environments stay on the
-    daemon backend.
+    Returns ``(remote_or_None, config_dir_or_None)``. The env-over-TOML
+    overlay rule itself lives in ``keep.remote.resolve_remote_config`` so it
+    cannot drift between MCP, the CLI, the wizard, and ``_get_keeper``.
     """
-    if os.environ.get("KEEP_LOCAL_ONLY"):
-        return None, None
+    from .remote import resolve_remote_config
 
-    # Always try to load TOML first so config-owned api_url/project still
-    # apply when only the api_key lives in the environment.
-    toml_remote: Optional[RemoteConfig] = None
-    toml_config_dir = None
+    config = None
+    config_dir = _resolve_config_dir()
     try:
         from .config import load_config
-        config_dir = _resolve_config_dir()
         config = load_config(config_dir)
-        if config.remote_persist:
-            toml_remote = config.remote_persist
-        toml_config_dir = config.config_dir or config_dir
     except (FileNotFoundError, ValueError):
-        toml_config_dir = _resolve_config_dir()
+        pass
 
-    env_url = os.environ.get("KEEPNOTES_API_URL")
-    env_key = os.environ.get("KEEPNOTES_API_KEY")
-    env_project = os.environ.get("KEEPNOTES_PROJECT")
-
-    # Overlay env on TOML, field by field.
-    api_url = env_url or (toml_remote.api_url if toml_remote else None) \
-        or "https://api.keepnotes.ai"
-    api_key = env_key or (toml_remote.api_key if toml_remote else None)
-    project = env_project or (toml_remote.project if toml_remote else None)
-
-    if not api_key:
+    remote = resolve_remote_config(config)
+    if remote is None:
         return None, None
-    return RemoteConfig(api_url=api_url, api_key=api_key, project=project or None), \
-        toml_config_dir
+    log_dir = (config.config_dir if config is not None else None) or config_dir
+    return remote, log_dir
 
 
 def _resolve_config_dir():

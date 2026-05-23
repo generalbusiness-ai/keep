@@ -56,7 +56,7 @@ from . import markdown_export as _markdown_export
 from .markdown_import import count_markdown_import_files
 from .markdown_mirrors import run_markdown_export_once
 from .paths import get_config_dir, get_default_store_path
-from .remote import RemoteKeeper
+from .remote import RemoteKeeper, resolve_remote_config
 from .setup_wizard import run_wizard
 from .utils import _list_directory_files
 from .workstream import derive_workstream_slug
@@ -143,46 +143,42 @@ def _load_cli_remote() -> tuple[RemoteConfig, StoreConfig] | None:
 
 
 def _compute_cli_remote() -> tuple[RemoteConfig, StoreConfig] | None:
-    """Uncached resolution; do not call directly outside _load_cli_remote()."""
-    if os.environ.get("KEEP_LOCAL_ONLY"):
-        return None
+    """Uncached resolution; do not call directly outside _load_cli_remote().
 
+    The env-over-TOML overlay rule itself lives in
+    ``keep.remote.resolve_remote_config`` so this function only worries about
+    where to load the TOML from and how to align the persist/from-env flags
+    on the resulting StoreConfig.
+    """
     config_dir = _remote_config_dir()
     config: StoreConfig | None = None
-    toml_remote: RemoteConfig | None = None
     try:
         config = load_config(config_dir)
-        toml_remote = config.remote_persist or config.remote
     except FileNotFoundError:
-        config = None
+        pass
     except ValueError as exc:
         typer.echo(f"Error loading keep config: {exc}", err=True)
         raise typer.Exit(1)
 
-    api_url = (
-        os.environ.get("KEEPNOTES_API_URL")
-        or (toml_remote.api_url if toml_remote else None)
-        or "https://api.keepnotes.ai"
-    )
-    api_key = os.environ.get("KEEPNOTES_API_KEY") or (
-        toml_remote.api_key if toml_remote else None
-    )
-    project = os.environ.get("KEEPNOTES_PROJECT") or (
-        toml_remote.project if toml_remote else None
-    )
-    if not api_key:
+    remote = resolve_remote_config(config)
+    if remote is None:
         return None
 
-    remote = RemoteConfig(api_url=api_url, api_key=api_key, project=project or None)
+    # Align with load_config's contract: env-only credentials (no persisted
+    # [remote] on disk) must keep remote_persist=None and remote_from_env=True
+    # so a later save_config() never writes the env-sourced secret to disk.
     if config is None:
         config = StoreConfig(
             path=config_dir,
             config_dir=config_dir,
             remote=remote,
-            remote_persist=remote,
+            remote_persist=None,
+            remote_from_env=True,
         )
     else:
         config.remote = remote
+        if config.remote_persist is None:
+            config.remote_from_env = True
     return remote, config
 
 
