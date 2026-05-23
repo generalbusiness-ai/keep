@@ -1,11 +1,15 @@
 """Typer command app for keep.
 
-Primarily daemon-backed commands for note/query flows, plus a small set of
-retained local or delegated commands for setup, daemon control, MCP, and
-data import/export.
+Commands route through the authoritative configured backend: hosted REST when
+``[remote]`` is active, otherwise the local daemon for note/query flows plus a
+small set of retained local commands for setup, daemon control, MCP, and data
+import/export.
 """
 
+import atexit
+import base64
 import json
+import mimetypes
 import os
 import shutil
 import sys
@@ -24,7 +28,7 @@ import typer
 
 from keep.help import get_help_topic
 from keep.mcp import main as mcp_main
-from keep.types import INTERNAL_TAGS, local_date, note_display_name
+from keep.types import INTERNAL_TAGS, file_uri_to_path, local_date, note_display_name
 from keep.utils import _extract_markdown_frontmatter
 from keep.validate import state_doc_diagram
 
@@ -33,7 +37,7 @@ from . import console_support as _console_support
 from . import daemon_client as _daemon_client
 from . import markdown_import as _markdown_import
 from . import markdown_mirrors as _markdown_mirrors
-from .config import load_or_create_config
+from .config import RemoteConfig, StoreConfig, load_config, load_or_create_config
 from .daemon_client import get_port as _daemon_get_port
 from .const import DAEMON_PORT_FILE, DAEMON_TOKEN_FILE, STATE_PROMPT
 from .console_support import (
@@ -52,6 +56,7 @@ from . import markdown_export as _markdown_export
 from .markdown_import import count_markdown_import_files
 from .markdown_mirrors import run_markdown_export_once
 from .paths import get_config_dir, get_default_store_path
+from .remote import RemoteKeeper
 from .setup_wizard import run_wizard
 from .utils import _list_directory_files
 from .workstream import derive_workstream_slug
@@ -76,6 +81,214 @@ app = typer.Typer(
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+
+_REMOTE_PORT = -1
+_remote_keeper = None
+_remote_keeper_key: tuple[str, str, str | None, str] | None = None
+
+# Cache for _load_cli_remote(): key is the tuple of inputs that can change the
+# resolution (env vars + store override). A stable key collapses the read to a
+# single load_config() call per CLI invocation; tests that flip env vars still
+# invalidate the cache automatically because the key changes.
+_cli_remote_cache_key: tuple | None = None
+_cli_remote_cache_value: tuple["RemoteConfig", "StoreConfig"] | None = None
+
+
+def _is_remote_port(port: int) -> bool:
+    return port == _REMOTE_PORT
+
+
+def _remote_config_dir() -> Path:
+    if _global_store:
+        return _resolved_store_path()
+    return get_config_dir()
+
+
+def _invalidate_cli_remote_cache() -> None:
+    """Force the next _load_cli_remote() call to re-read keep.toml."""
+    global _cli_remote_cache_key, _cli_remote_cache_value
+    _cli_remote_cache_key = None
+    _cli_remote_cache_value = None
+
+
+def _cli_remote_cache_inputs() -> tuple:
+    """Snapshot of the inputs _load_cli_remote() actually depends on."""
+    return (
+        os.environ.get("KEEP_LOCAL_ONLY"),
+        os.environ.get("KEEPNOTES_API_URL"),
+        os.environ.get("KEEPNOTES_API_KEY"),
+        os.environ.get("KEEPNOTES_PROJECT"),
+        os.environ.get("KEEP_CONFIG"),
+        os.environ.get("KEEP_STORE_PATH"),
+        str(_global_store) if _global_store else None,
+    )
+
+
+def _load_cli_remote() -> tuple[RemoteConfig, StoreConfig] | None:
+    """Return authoritative remote config for CLI transactions, if active.
+
+    Cached per-invocation against the env/store-override inputs so that a
+    single CLI run does not re-parse keep.toml for every command-internal
+    check (``_cli_remote_active``, ``_get_port``, ``_get_remote_keeper``, …).
+    """
+    global _cli_remote_cache_key, _cli_remote_cache_value
+    key = _cli_remote_cache_inputs()
+    if _cli_remote_cache_key == key:
+        return _cli_remote_cache_value
+
+    value = _compute_cli_remote()
+    _cli_remote_cache_key = key
+    _cli_remote_cache_value = value
+    return value
+
+
+def _compute_cli_remote() -> tuple[RemoteConfig, StoreConfig] | None:
+    """Uncached resolution; do not call directly outside _load_cli_remote()."""
+    if os.environ.get("KEEP_LOCAL_ONLY"):
+        return None
+
+    config_dir = _remote_config_dir()
+    config: StoreConfig | None = None
+    toml_remote: RemoteConfig | None = None
+    try:
+        config = load_config(config_dir)
+        toml_remote = config.remote_persist or config.remote
+    except FileNotFoundError:
+        config = None
+    except ValueError as exc:
+        typer.echo(f"Error loading keep config: {exc}", err=True)
+        raise typer.Exit(1)
+
+    api_url = (
+        os.environ.get("KEEPNOTES_API_URL")
+        or (toml_remote.api_url if toml_remote else None)
+        or "https://api.keepnotes.ai"
+    )
+    api_key = os.environ.get("KEEPNOTES_API_KEY") or (
+        toml_remote.api_key if toml_remote else None
+    )
+    project = os.environ.get("KEEPNOTES_PROJECT") or (
+        toml_remote.project if toml_remote else None
+    )
+    if not api_key:
+        return None
+
+    remote = RemoteConfig(api_url=api_url, api_key=api_key, project=project or None)
+    if config is None:
+        config = StoreConfig(
+            path=config_dir,
+            config_dir=config_dir,
+            remote=remote,
+            remote_persist=remote,
+        )
+    else:
+        config.remote = remote
+    return remote, config
+
+
+def _cli_remote_active() -> bool:
+    return _load_cli_remote() is not None
+
+
+def _get_remote_keeper():
+    """Cached RemoteKeeper for hosted-mode CLI REST calls."""
+    global _remote_keeper, _remote_keeper_key
+    loaded = _load_cli_remote()
+    if loaded is None:
+        return None
+    remote, config = loaded
+    key = (
+        remote.api_url,
+        remote.api_key,
+        remote.project,
+        str(config.config_dir or config.path),
+    )
+    if _remote_keeper is not None and _remote_keeper_key == key:
+        return _remote_keeper
+
+    if _remote_keeper is not None:
+        try:
+            _remote_keeper.close()
+        except Exception:
+            pass
+
+    _remote_keeper = RemoteKeeper(
+        remote.api_url,
+        remote.api_key,
+        config,
+        project=remote.project,
+    )
+    _remote_keeper_key = key
+    atexit.register(_remote_keeper.close)
+    return _remote_keeper
+
+
+def _guess_remote_upload_content_type(path: Path, data: bytes) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        return "text/markdown"
+
+    guessed, _encoding = mimetypes.guess_type(str(path))
+    if guessed in {
+        "application/pdf",
+        "text/html",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "audio/mpeg",
+        "audio/flac",
+        "audio/wav",
+        "audio/ogg",
+        "audio/mp4",
+        "audio/aiff",
+        "audio/x-ms-wma",
+        "image/jpeg",
+        "image/png",
+        "image/tiff",
+        "image/webp",
+        "text/plain",
+        "text/markdown",
+    }:
+        return guessed
+    if guessed and guessed.startswith("text/"):
+        return "text/plain"
+    try:
+        data[:4096].decode("utf-8")
+    except UnicodeDecodeError:
+        return guessed or "application/octet-stream"
+    return "text/plain"
+
+
+def _remote_note_body(body: dict | None) -> dict | None:
+    if body is None:
+        return None
+    prepared = {k: v for k, v in body.items() if v is not None}
+
+    if prepared.get("watch") or prepared.get("unwatch"):
+        raise ValueError(
+            "remote mode cannot manage local file watches; the hosted service "
+            "processes writes directly"
+        )
+    if prepared.get("enqueue_git"):
+        raise ValueError(
+            "remote mode cannot enqueue local git-history ingest through the "
+            "local daemon"
+        )
+
+    uri = prepared.get("uri")
+    if isinstance(uri, str) and uri.startswith("file://"):
+        path = Path(file_uri_to_path(uri)).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"remote file upload requires a regular file: {path}")
+        data = path.read_bytes()
+        prepared.setdefault("id", uri)
+        # The hosted API treats content, content_base64, and uri as mutually
+        # exclusive content sources. Use the original file URI as the default
+        # note identity, but do not send it as the source to fetch.
+        prepared.pop("uri", None)
+        prepared["content_base64"] = base64.b64encode(data).decode("ascii")
+        prepared["content_type"] = _guess_remote_upload_content_type(path, data)
+
+    return prepared
 
 def _q(id: str) -> str:
     """URL-encode an ID for path segments."""
@@ -218,7 +431,11 @@ def _require_markdown_export_host():
 
 def _daemon_error_message(body: dict, default: str = "unknown") -> str:
     """Format daemon errors with request_id so users can correlate logs."""
-    message = str(body.get("error", default))
+    raw_message = body.get("error", body.get("detail", default))
+    if isinstance(raw_message, (dict, list)):
+        message = json.dumps(raw_message)
+    else:
+        message = str(raw_message)
     request_id = body.get("request_id")
     if request_id:
         return f"{message} (request_id={request_id})"
@@ -238,7 +455,7 @@ def _get(port: int, path: str) -> dict:
 
 def _post(port: int, path: str, body: dict) -> dict:
     status, result = _daemon_request("POST", port, path, body)
-    if status != 200:
+    if status not in (200, 202):
         typer.echo(f"Error: {_daemon_error_message(result)}", err=True)
         raise typer.Exit(1)
     return result
@@ -318,6 +535,8 @@ def _should_use_now_put_path(
 
 def _daemon_request(method: str, port: int, path: str, body: dict | None = None) -> tuple[int, dict]:
     """Make one daemon request using the shared daemon-client retry policy."""
+    if _is_remote_port(port):
+        return _remote_request(method, path, body)
     return _daemon_client.http_request_with_discovery_retry(
         method,
         port,
@@ -327,12 +546,107 @@ def _daemon_request(method: str, port: int, path: str, body: dict | None = None)
     )
 
 
+def _remote_request(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    """Make a hosted REST API request for remote-mode CLI commands."""
+    keeper = _get_remote_keeper()
+    if keeper is None:
+        return 503, {"error": "remote backend is not configured"}
+
+    payload = body
+    if method.upper() == "POST" and path == "/v1/notes":
+        try:
+            payload = _remote_note_body(body)
+        except (OSError, ValueError) as exc:
+            return 400, {"error": str(exc)}
+    elif method.upper() == "POST" and path == "/v1/search":
+        params = body or {}
+        try:
+            items = keeper.find(
+                params.get("query"),
+                tags=params.get("tags"),
+                similar_to=params.get("similar_to"),
+                limit=int(params.get("limit") or 10),
+                since=params.get("since"),
+                until=params.get("until"),
+                include_self=bool(params.get("include_self")),
+                include_hidden=bool(params.get("include_hidden")),
+                deep=bool(params.get("deep")),
+                scope=params.get("scope"),
+            )
+        except Exception as exc:
+            return 503, {"error": str(exc)}
+        return 200, {
+            "notes": [_remote_item_to_note(item) for item in items],
+            "deep_groups": [
+                {
+                    "id": group_id,
+                    "items": [_remote_item_to_note(item) for item in group_items],
+                }
+                for group_id, group_items in getattr(items, "deep_groups", {}).items()
+            ],
+        }
+    elif body is not None:
+        payload = {k: v for k, v in body.items() if v is not None}
+
+    start = _time.monotonic()
+    try:
+        response = keeper._client.request(
+            method.upper(),
+            path,
+            json=payload if payload is not None else None,
+        )
+    except Exception as exc:
+        return 503, {"error": str(exc)}
+
+    try:
+        keeper._log_call(
+            method.upper(),
+            path,
+            response.status_code,
+            int((_time.monotonic() - start) * 1000),
+        )
+    except Exception:
+        pass
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"error": response.text or response.reason_phrase}
+    if not isinstance(data, dict):
+        data = {"data": data}
+    return response.status_code, data
+
+
+def _remote_item_to_note(item) -> dict:
+    note = {
+        "id": getattr(item, "id", ""),
+        "summary": getattr(item, "summary", ""),
+        "tags": getattr(item, "tags", {}) or {},
+    }
+    score = getattr(item, "score", None)
+    if score is not None:
+        note["score"] = score
+    return note
+
+
 # ---------------------------------------------------------------------------
 # Daemon port resolution (delegates to daemon_client)
 # ---------------------------------------------------------------------------
 
 def _get_port() -> int:
-    """Get daemon port, auto-starting if needed."""
+    """Get the active CLI transport target.
+
+    In remote mode this deliberately returns a sentinel instead of starting the
+    local daemon. Existing local stores remain on disk but are inactive for new
+    CLI transactions.
+    """
+    if _cli_remote_active():
+        return _REMOTE_PORT
+    return _daemon_get_port(_global_store)
+
+
+def _get_local_daemon_port() -> int:
+    """Get the local daemon port even when CLI note traffic is remote-routed."""
     return _daemon_get_port(_global_store)
 
 
@@ -873,7 +1187,14 @@ def _put_directory(
     watch: bool, unwatch: bool, interval: str | None,
     force: bool, json_output: bool,
 ) -> None:
-    """Index files from a directory via the daemon HTTP API."""
+    """Index files from a directory via the active CLI transport."""
+    if _is_remote_port(port) and (watch or unwatch):
+        typer.echo(
+            "Error: remote mode cannot manage local directory watches",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     max_dir_files = 1000
 
     # Fast local precheck so obviously ineligible directories fail before
@@ -957,6 +1278,9 @@ def _put_directory(
     typer.echo(f"{indexed} indexed, {len(errors)} errors from {resolved_path.name}/", err=True)
     for e in errors:
         typer.echo(f"  error: {e}", err=True)
+
+    if _is_remote_port(port):
+        return
 
     # Queue initial git-history ingest for any repos under the imported tree.
     # This is separate from file indexing because commit items are background
@@ -1064,6 +1388,13 @@ def put(
         raise typer.Exit(1)
     if interval and not watch:
         typer.echo("Error: --interval requires --watch", err=True)
+        raise typer.Exit(1)
+    if _cli_remote_active() and (watch or unwatch):
+        typer.echo(
+            "Error: --watch/--unwatch require the local daemon; remote mode "
+            "processes new writes in the hosted service",
+            err=True,
+        )
         raise typer.Exit(1)
 
     # Expand ${.field} templates from stdin JSON (hook support)
@@ -1695,10 +2026,23 @@ def analyze(
     and embedding. Runs in background by default; use --fg to wait.
     """
     port = _get_port()
-    body: dict = {"id": id, "foreground": foreground, "force": force}
-    if tag:
-        body["tags"] = tag
-    data = _post(port, "/v1/analyze", body)
+    if _is_remote_port(port):
+        if foreground:
+            typer.echo(
+                "Error: --foreground is not supported in remote mode; hosted "
+                "analysis is queued for background processing",
+                err=True,
+            )
+            raise typer.Exit(1)
+        body: dict = {"force": force}
+        if tag:
+            body["tags"] = tag
+        data = _post(port, f"/v1/notes/{_q(id)}/analyze", body)
+    else:
+        body: dict = {"id": id, "foreground": foreground, "force": force}
+        if tag:
+            body["tags"] = tag
+        data = _post(port, "/v1/analyze", body)
 
     if _is_json(json_output):
         typer.echo(json.dumps(data, indent=2))
@@ -1714,6 +2058,10 @@ def analyze(
                 typer.echo(f"Content not decomposable into multiple parts: {id}")
         elif data.get("queued"):
             typer.echo(f"Queued {id} for background analysis.", err=True)
+        elif data.get("status") in {"queued", "processing"}:
+            typer.echo(f"Queued {id} for background analysis.", err=True)
+        elif data.get("status") == "ready":
+            typer.echo(f"Already analyzed, skipping {id}.", err=True)
         elif data.get("skipped"):
             typer.echo(f"Already analyzed, skipping {id}.", err=True)
 
@@ -1785,6 +2133,14 @@ def _daemon_command_impl(
             typer.echo(f"Error stopping daemon: {e}", err=True)
         (store_path / DAEMON_PORT_FILE).unlink(missing_ok=True)
         (store_path / DAEMON_TOKEN_FILE).unlink(missing_ok=True)
+        return
+
+    if _cli_remote_active() and not daemon:
+        typer.echo(
+            "Remote backend configured; local pending operations are inactive "
+            "for new transactions. The hosted service processes remote work.",
+            err=True,
+        )
         return
 
     if list_items:
@@ -1918,7 +2274,10 @@ def config(
     Dotted paths: providers.embedding, tags, etc.
     """
     if reset_system_docs:
-        port = _get_port()
+        # System-doc reset is local-store maintenance; the hosted service does
+        # not expose this endpoint. Always target the local daemon, even in
+        # remote mode.
+        port = _get_local_daemon_port()
         data = _post(port, "/v1/admin/reset-system-docs", {})
         count = data.get("reset", 0)
         typer.echo(f"Reset {count} system documents")
@@ -2056,7 +2415,7 @@ def data_export(
         if sync or stop:
             typer.echo("Error: --list cannot be combined with --sync or --stop", err=True)
             raise SystemExit(1)
-        port = _get_port()
+        port = _get_local_daemon_port()
         status, data = _daemon_request(
             "POST",
             port,
@@ -2125,7 +2484,7 @@ def data_export(
                 if output == "-":
                     typer.echo("Error: markdown export requires a directory path, not '-'", err=True)
                     raise SystemExit(1)
-                port = _get_port()
+                port = _get_local_daemon_port()
                 status, data = _daemon_request(
                     "POST",
                     port,
@@ -2185,7 +2544,7 @@ def data_export(
                 if is_tty:
                     _clear_progress_line()
 
-            port = _get_port()
+            port = _get_local_daemon_port()
             status, data = _daemon_request(
                 "POST",
                 port,
@@ -2400,6 +2759,7 @@ def data_import(
         else:
             import_format = "json"
 
+    data: dict | None = None
     if mode == "replace":
         if import_format == "json":
             if file == "-":
@@ -2417,6 +2777,56 @@ def data_import(
                 f"This will delete all existing documents and import markdown from {file}. Continue?"
             ):
                 raise SystemExit(0)
+
+    if _cli_remote_active():
+        if import_format == "json":
+            if data is None:
+                if file == "-":
+                    data = json.loads(sys.stdin.read())
+                else:
+                    assert p is not None
+                    data = json.loads(p.read_text(encoding="utf-8"))
+        else:
+            if file == "-":
+                typer.echo("Error: markdown import does not support stdin", err=True)
+                raise SystemExit(1)
+            assert p is not None
+            show_progress = False
+            progress = None
+            total_files = _markdown_import.count_markdown_import_files(p)
+            if total_files > 1 and sys.stderr.isatty():
+                show_progress = True
+
+                def progress(current: int, total: int, label: str) -> None:
+                    if total > 1:
+                        _console_support._progress_bar(current, total, label, err=True)
+
+            try:
+                documents, _ref_map = _markdown_import.load_markdown_import(
+                    p,
+                    progress=progress,
+                )
+            finally:
+                if show_progress:
+                    _clear_progress_line()
+            data = {"format": "keep-export", "version": 1, "documents": documents}
+
+        assert data is not None
+        payload = {
+            "format": data.get("format", "keep-export"),
+            "version": data.get("version", 1),
+            "documents": data.get("documents", []),
+            "mode": mode,
+        }
+        stats = _post(_get_port(), "/v1/import", payload)
+        typer.echo(
+            f"Imported {stats['imported']} documents "
+            f"({stats['versions']} versions, {stats['parts']} parts), "
+            f"skipped {stats['skipped']}. "
+            f"Queued {stats['queued']} for hosted processing.",
+            err=True,
+        )
+        return
 
     kp = _api.Keeper(store_path=_resolved_store_path())
     try:

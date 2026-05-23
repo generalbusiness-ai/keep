@@ -781,8 +781,8 @@ def _get_keeper(store: Optional[Path], *, _force_local: bool = False) -> "Keeper
 
     Returns a local Keeper or RemoteKeeper depending on authoritative-store
     config.
-    Local daemon commands (put directory, pending, etc.)
-    always use a local Keeper — the command app handles the daemon HTTP path.
+    Local daemon commands use a local Keeper only when no authoritative remote
+    backend is active, or when explicitly forced local.
 
     When ``_force_local`` is True, skips the remote backend check
     (used by ``keep daemon`` and the hidden ``keep pending`` compatibility alias).
@@ -790,24 +790,90 @@ def _get_keeper(store: Optional[Path], *, _force_local: bool = False) -> "Keeper
     import atexit
     from .api import Keeper
 
-    # Env vars target the remote authoritative store.
-    api_url = os.environ.get("KEEPNOTES_API_URL", "https://api.keepnotes.ai")
-    api_key = os.environ.get("KEEPNOTES_API_KEY")
-    if api_url and api_key and not _force_local:
-        from .config import get_config_dir, load_or_create_config
-        from .remote import RemoteKeeper
+    # Check global override from --store on main command
+    actual_store = store if store is not None else _get_store_override()
+    if not _force_local and not os.environ.get("KEEP_LOCAL_ONLY"):
+        # Env vars overlay TOML [remote] field-by-field. Resolve the effective
+        # remote before constructing a local Keeper so remote-mode commands do
+        # not enqueue local startup or pending work merely by discovering the
+        # backend.
         try:
-            config_dir = get_config_dir()
-            config = load_or_create_config(config_dir)
-            kp = RemoteKeeper(api_url, api_key, config)
-            atexit.register(kp.close)
-            return kp
+            from .config import (
+                RemoteConfig,
+                StoreConfig,
+                load_config,
+                load_or_create_config,
+            )
+            from .paths import get_config_dir
+            if os.environ.get("KEEP_CONFIG"):
+                remote_config_dir = get_config_dir()
+            elif actual_store is not None:
+                remote_config_dir = Path(actual_store).resolve()
+            else:
+                remote_config_dir = get_config_dir()
+
+            config = None
+            toml_remote = None
+            try:
+                config = load_config(remote_config_dir)
+                toml_remote = getattr(config, "remote_persist", None) or getattr(config, "remote", None)
+            except FileNotFoundError:
+                if os.environ.get("KEEPNOTES_API_KEY"):
+                    config = load_or_create_config(
+                        remote_config_dir,
+                        Path(actual_store).resolve() if actual_store else None,
+                    )
+
+            api_url = (
+                os.environ.get("KEEPNOTES_API_URL")
+                or (toml_remote.api_url if toml_remote else None)
+                or "https://api.keepnotes.ai"
+            )
+            api_key = os.environ.get("KEEPNOTES_API_KEY") or (
+                toml_remote.api_key if toml_remote else None
+            )
+            project = os.environ.get("KEEPNOTES_PROJECT") or (
+                toml_remote.project if toml_remote else None
+            )
+            if api_key:
+                remote_cfg = RemoteConfig(
+                    api_url=api_url,
+                    api_key=api_key,
+                    project=project or None,
+                )
+                if config is None:
+                    config = StoreConfig(
+                        path=remote_config_dir,
+                        config_dir=remote_config_dir,
+                        remote=remote_cfg,
+                        remote_persist=(
+                            None if os.environ.get("KEEPNOTES_API_KEY")
+                            else remote_cfg
+                        ),
+                        remote_from_env=bool(os.environ.get("KEEPNOTES_API_KEY")),
+                    )
+                else:
+                    config.remote = remote_cfg
+                    if os.environ.get("KEEPNOTES_API_KEY") and toml_remote is None:
+                        config.remote_from_env = True
+                from .remote import RemoteKeeper
+                remote = RemoteKeeper(
+                    remote_cfg.api_url,
+                    remote_cfg.api_key,
+                    config,
+                    project=remote_cfg.project,
+                )
+                atexit.register(remote.close)
+                return remote
+        except FileNotFoundError:
+            pass
+        except ValueError as e:
+            typer.echo(f"Error loading keep config: {e}", err=True)
+            raise typer.Exit(1)
         except Exception as e:
             typer.echo(f"Error connecting to remote: {e}", err=True)
             raise typer.Exit(1)
 
-    # Check global override from --store on main command
-    actual_store = store if store is not None else _get_store_override()
     try:
         # Run setup wizard on first use (no existing config)
         from .paths import get_config_dir

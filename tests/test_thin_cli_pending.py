@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from keep import cli_app
 from keep.const import DAEMON_PORT_FILE, DAEMON_TOKEN_FILE
 from keep.markdown_mirrors import MarkdownMirrorEntry
+from tests.conftest import _write_test_store_config
 
 
 def test_pending_stop_cleans_stale_discovery_files_without_pid(tmp_path, capsys):
@@ -105,3 +106,155 @@ def test_hidden_pending_alias_still_runs_interactive_mode(tmp_path):
     assert result.exit_code == 0, result.stdout
     interactive.assert_called_once_with(kp)
     kp.close.assert_called_once()
+
+
+def _write_remote_store_config(store):
+    _write_test_store_config(store)
+    with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+        fh.write(
+            "\n[remote]\n"
+            "api_url = \"https://api.example.test\"\n"
+            "api_key = \"kn_test\"\n"
+            "project = \"first-user\"\n"
+        )
+
+
+def test_pending_does_not_open_local_store_when_remote_configured(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_remote_store_config(store)
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+    monkeypatch.setattr(cli_app, "_global_store", None)
+    runner = CliRunner()
+
+    with (
+        patch(
+            "keep.api.Keeper",
+            side_effect=AssertionError("local Keeper must not open in remote mode"),
+        ),
+        patch(
+            "keep.console_support.run_pending_daemon",
+            side_effect=AssertionError("local daemon must not run in remote mode"),
+        ),
+    ):
+        pending_result = runner.invoke(
+            cli_app.app,
+            ["--store", str(store), "pending"],
+            catch_exceptions=False,
+        )
+
+    assert pending_result.exit_code == 0, pending_result.output
+    assert "Remote backend configured" in pending_result.stderr
+
+
+def test_daemon_runs_local_services_when_remote_configured(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_remote_store_config(store)
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+    monkeypatch.setattr(cli_app, "_global_store", None)
+    kp = MagicMock()
+    runner = CliRunner()
+
+    with (
+        patch("keep.api.Keeper", return_value=kp) as keeper_cls,
+        patch("keep.console_support.run_pending_daemon") as run_daemon,
+    ):
+        daemon_result = runner.invoke(
+            cli_app.app,
+            ["--store", str(store), "daemon"],
+            catch_exceptions=False,
+        )
+
+    assert daemon_result.exit_code == 0, daemon_result.output
+    keeper_cls.assert_called_once_with(store_path=store.resolve())
+    run_daemon.assert_called_once_with(
+        kp,
+        bind_host=None,
+        advertised_url=None,
+        trusted_proxy=False,
+    )
+
+
+def test_reset_system_docs_targets_local_daemon_even_when_remote_configured(
+    tmp_path, monkeypatch,
+):
+    """`keep config --reset-system-docs` is local maintenance; never route remote."""
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_remote_store_config(store)
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+    monkeypatch.setattr(cli_app, "_global_store", None)
+    cli_app._invalidate_cli_remote_cache()
+
+    daemon_calls: list[tuple[str, int, str, dict | None]] = []
+
+    def fake_daemon_request(method, port, path, body=None):
+        daemon_calls.append((method, port, path, body))
+        return 200, {"reset": 5}
+
+    with (
+        patch("keep.cli_app._get_local_daemon_port", return_value=1234),
+        patch(
+            "keep.cli_app._remote_request",
+            side_effect=AssertionError("reset-system-docs must not route remote"),
+        ),
+        patch("keep.cli_app._daemon_request", side_effect=fake_daemon_request),
+    ):
+        result = CliRunner().invoke(
+            cli_app.app,
+            ["--store", str(store), "config", "--reset-system-docs"],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert daemon_calls == [
+        ("POST", 1234, "/v1/admin/reset-system-docs", {})
+    ]
+    assert "Reset 5 system documents" in result.output
+
+
+def test_load_cli_remote_is_cached_across_calls(tmp_path, monkeypatch):
+    """Successive _load_cli_remote() calls reuse the cached load_config result."""
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_remote_store_config(store)
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+    monkeypatch.setattr(cli_app, "_global_store", store.resolve())
+    cli_app._invalidate_cli_remote_cache()
+
+    import keep.cli_app as _ca
+
+    calls = {"n": 0}
+    real_load = _ca.load_config
+
+    def counting_load(path):
+        calls["n"] += 1
+        return real_load(path)
+
+    monkeypatch.setattr(_ca, "load_config", counting_load)
+
+    a = _ca._load_cli_remote()
+    b = _ca._load_cli_remote()
+    c = _ca._load_cli_remote()
+
+    assert a is not None
+    assert a is b is c                  # same cached tuple object
+    assert calls["n"] == 1               # only one TOML read across three calls
+
+    # Changing an env var that affects resolution must invalidate the cache.
+    monkeypatch.setenv("KEEPNOTES_API_URL", "https://override.example.test")
+    d = _ca._load_cli_remote()
+    assert d is not None
+    assert d[0].api_url == "https://override.example.test"
+    assert calls["n"] == 2
+
+    cli_app._invalidate_cli_remote_cache()

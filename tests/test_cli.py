@@ -7,6 +7,7 @@ Tests verify:
 4. Human-readable output is line-oriented (for grep/wc/etc.)
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -927,6 +928,72 @@ class TestShellQuoteId:
 class TestPutDirectory:
     """Tests for directory mode in the put command."""
 
+    def _write_remote_config(self, store: Path) -> None:
+        _write_test_store_config(store)
+        with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+            fh.write(
+                "\n[remote]\n"
+                "api_url = \"https://api.example.test\"\n"
+                "api_key = \"kn_test\"\n"
+                "project = \"first-user\"\n"
+            )
+
+    def _fake_remote_keeper(self, monkeypatch, calls: list[tuple[str, str, dict | None]]):
+        from keep import cli_app
+
+        class FakeResponse:
+            def __init__(self, status_code: int, data: dict):
+                self.status_code = status_code
+                self._data = data
+                self.text = json.dumps(data)
+                self.reason_phrase = "OK" if status_code < 400 else "error"
+
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            def request(self, method, path, json=None):
+                calls.append((method, path, json))
+                if method == "GET" and path.startswith("/v1/notes/.ignore"):
+                    return FakeResponse(404, {"detail": "not found"})
+                if method == "POST" and path == "/v1/notes":
+                    return FakeResponse(200, {
+                        "id": (
+                            (json or {}).get("id")
+                            or (json or {}).get("uri")
+                            or f"remote-{len(calls)}"
+                        ),
+                        "summary": "",
+                        "tags": (json or {}).get("tags") or {},
+                    })
+                return FakeResponse(200, {})
+
+        class FakeRemoteKeeper:
+            def __init__(self):
+                self._client = FakeClient()
+
+            def _log_call(self, *args, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        fake = FakeRemoteKeeper()
+        monkeypatch.setattr(cli_app, "_remote_keeper", fake)
+        monkeypatch.setattr(
+            cli_app,
+            "_remote_keeper_key",
+            ("https://api.example.test", "kn_test", "first-user", ""),
+        )
+        monkeypatch.setattr(cli_app, "_get_remote_keeper", lambda: fake)
+        monkeypatch.setattr(
+            cli_app,
+            "_daemon_get_port",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("local daemon must not start in remote mode")
+            ),
+        )
+
     def test_list_directory_files_basic(self, tmp_path):
         """_list_directory_files returns regular files sorted by name."""
         from keep.console_support import _list_directory_files
@@ -1093,6 +1160,236 @@ class TestPutDirectory:
         result = cli("put", str(tmp_path))
         assert result.returncode == 1
         assert "no eligible files" in result.stderr
+
+    def test_remote_put_file_uploads_to_hosted_without_daemon(self, tmp_path, monkeypatch):
+        """A TOML [remote] makes file puts hosted uploads, not daemon writes."""
+        from keep import cli_app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        self._write_remote_config(store)
+        source = tmp_path / "note.txt"
+        source.write_text("hosted file body", encoding="utf-8")
+        calls: list[tuple[str, str, dict | None]] = []
+        self._fake_remote_keeper(monkeypatch, calls)
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["--store", str(store), "put", str(source), "--id", "uploaded"],
+            catch_exceptions=False,
+            terminal_width=120,
+        )
+
+        assert result.exit_code == 0, result.output
+        note_posts = [body for method, path, body in calls if method == "POST" and path == "/v1/notes"]
+        assert len(note_posts) == 1
+        body = note_posts[0]
+        assert body is not None
+        assert body["id"] == "uploaded"
+        assert "uri" not in body
+        assert body["content_type"] == "text/plain"
+        assert base64.b64decode(body["content_base64"]).decode() == "hosted file body"
+
+    def test_remote_put_file_without_id_uses_file_uri_identity(self, tmp_path, monkeypatch):
+        """Remote uploads keep URI-mode ID semantics when --id is omitted."""
+        from keep import cli_app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        self._write_remote_config(store)
+        source = tmp_path / "note.txt"
+        source.write_text("hosted file body", encoding="utf-8")
+        calls: list[tuple[str, str, dict | None]] = []
+        self._fake_remote_keeper(monkeypatch, calls)
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+
+        result = CliRunner().invoke(
+            app,
+            ["--store", str(store), "put", str(source)],
+            catch_exceptions=False,
+            terminal_width=120,
+        )
+
+        assert result.exit_code == 0, result.output
+        note_posts = [body for method, path, body in calls if method == "POST" and path == "/v1/notes"]
+        assert len(note_posts) == 1
+        body = note_posts[0]
+        file_uri = f"file://{source.resolve()}"
+        assert body is not None
+        assert body["id"] == file_uri
+        assert "uri" not in body
+        assert base64.b64decode(body["content_base64"]).decode() == "hosted file body"
+
+    def test_remote_put_directory_uploads_files_and_skips_local_git_enqueue(
+        self, tmp_path, monkeypatch,
+    ):
+        """Recursive directory puts upload child files to hosted REST only."""
+        from keep import cli_app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        self._write_remote_config(store)
+        root = tmp_path / "docs"
+        (root / "nested").mkdir(parents=True)
+        (root / "a.txt").write_text("alpha", encoding="utf-8")
+        (root / "nested" / "b.md").write_text("bravo", encoding="utf-8")
+        calls: list[tuple[str, str, dict | None]] = []
+        self._fake_remote_keeper(monkeypatch, calls)
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["--store", str(store), "put", str(root), "-r", "-t", "project=remote"],
+            catch_exceptions=False,
+            terminal_width=120,
+        )
+
+        assert result.exit_code == 0, result.output
+        note_posts = [body for method, path, body in calls if method == "POST" and path == "/v1/notes"]
+        assert len(note_posts) == 2
+        decoded = sorted(base64.b64decode(body["content_base64"]).decode() for body in note_posts)
+        assert decoded == ["alpha", "bravo"]
+        assert all("uri" not in body for body in note_posts)
+        assert sorted(body["id"] for body in note_posts) == [
+            f"file://{(root / 'a.txt').resolve()}",
+            f"file://{(root / 'nested' / 'b.md').resolve()}",
+        ]
+        assert all(body["tags"] == {"project": "remote"} for body in note_posts)
+        assert all(not body.get("enqueue_git") for body in note_posts)
+
+    def test_remote_put_watch_is_rejected_without_daemon(self, tmp_path, monkeypatch):
+        """Remote mode must not fall back to local watch/pending behavior."""
+        from keep import cli_app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        self._write_remote_config(store)
+        source = tmp_path / "note.txt"
+        source.write_text("body", encoding="utf-8")
+        calls: list[tuple[str, str, dict | None]] = []
+        self._fake_remote_keeper(monkeypatch, calls)
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["--store", str(store), "put", str(source), "--watch"],
+            catch_exceptions=False,
+            terminal_width=120,
+        )
+
+        assert result.exit_code == 1
+        assert "--watch/--unwatch require the local daemon" in result.stderr
+        assert calls == []
+
+    def test_remote_analyze_force_is_sent_to_hosted_endpoint(self, tmp_path, monkeypatch):
+        """Remote analyze preserves --force instead of silently downgrading it."""
+        from keep import cli_app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        self._write_remote_config(store)
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_remote_request(method, path, body=None):
+            calls.append((method, path, body))
+            return 202, {"id": "doc-1", "status": "queued"}
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+        monkeypatch.setattr(cli_app, "_remote_request", fake_remote_request)
+        monkeypatch.setattr(
+            cli_app,
+            "_daemon_get_port",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("local daemon must not start in remote mode")
+            ),
+        )
+
+        result = CliRunner().invoke(
+            app,
+            ["--store", str(store), "analyze", "doc-1", "--force", "-t", "topic"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert calls == [
+            ("POST", "/v1/notes/doc-1/analyze", {"force": True, "tags": ["topic"]})
+        ]
+
+    def test_remote_find_uses_flow_backed_remote_keeper(self, tmp_path, monkeypatch):
+        """Hosted CLI find uses RemoteKeeper flow support, not a local daemon."""
+        from keep import cli_app
+        from keep.types import Item
+
+        store = tmp_path / "store"
+        store.mkdir()
+        self._write_remote_config(store)
+        calls: list[dict] = []
+
+        class FakeRemoteKeeper:
+            def find(self, query=None, **kwargs):
+                calls.append({"query": query, **kwargs})
+                return [
+                    Item(
+                        id="remote-found",
+                        summary="found through hosted flow",
+                        tags={"topic": "cli"},
+                        score=0.75,
+                    )
+                ]
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+        monkeypatch.setattr(cli_app, "_get_remote_keeper", lambda: FakeRemoteKeeper())
+        monkeypatch.setattr(
+            cli_app,
+            "_daemon_get_port",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("local daemon must not start in remote mode")
+            ),
+        )
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "--store", str(store),
+                "--json",
+                "find", "needle",
+                "--limit", "3",
+                "-t", "topic=cli",
+            ],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["notes"][0]["id"] == "remote-found"
+        assert calls == [{
+            "query": "needle",
+            "tags": {"topic": "cli"},
+            "similar_to": None,
+            "limit": 3,
+            "since": None,
+            "until": None,
+            "include_self": False,
+            "include_hidden": False,
+            "deep": False,
+            "scope": None,
+        }]
 
     def test_put_directory_watch_sends_directory_kind(self, tmp_path, monkeypatch):
         """`keep put <dir> --watch` posts watch_kind=directory and enqueue_git."""

@@ -1,10 +1,11 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
 from keep.config import StoreConfig
 from keep.remote import RemoteKeeper
+from tests.conftest import _write_test_store_config
 
 
 def test_remote_http_error_includes_daemon_request_id(tmp_path):
@@ -81,3 +82,94 @@ def test_remote_close_removes_client_log_handler(tmp_path):
 
     assert handler not in logging.getLogger("keep").handlers
     assert keeper._client_log_handler is None
+
+
+def test_get_keeper_toml_remote_does_not_construct_local_keeper(tmp_path, monkeypatch):
+    """TOML [remote] is authoritative before any local startup work can queue."""
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_test_store_config(store)
+    with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+        fh.write(
+            "\n[remote]\n"
+            "api_url = \"https://api.example.test\"\n"
+            "api_key = \"kn_test\"\n"
+            "project = \"first-user\"\n"
+        )
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+    monkeypatch.delenv("KEEP_CONFIG", raising=False)
+
+    class FakeRemoteKeeper:
+        def __init__(self, api_url, api_key, config, *, project=None):
+            self.api_url = api_url
+            self.api_key = api_key
+            self.config = config
+            self.project = project
+
+        def close(self):
+            pass
+
+    with (
+        patch(
+            "keep.api.Keeper",
+            side_effect=AssertionError("local Keeper must not be constructed"),
+        ),
+        patch("keep.remote.RemoteKeeper", FakeRemoteKeeper),
+    ):
+        from keep.console_support import _get_keeper
+
+        keeper = _get_keeper(store)
+
+    assert isinstance(keeper, FakeRemoteKeeper)
+    assert keeper.api_url == "https://api.example.test"
+    assert keeper.api_key == "kn_test"
+    assert keeper.project == "first-user"
+
+
+def test_get_keeper_env_key_overlays_store_toml_remote(tmp_path, monkeypatch):
+    """Env credentials must not make _get_keeper ignore --store TOML fields."""
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_test_store_config(store)
+    with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+        fh.write(
+            "\n[remote]\n"
+            "api_url = \"https://config.example.test\"\n"
+            "api_key = \"kn_file\"\n"
+            "project = \"from-file\"\n"
+        )
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+    monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
+    monkeypatch.delenv("KEEP_CONFIG", raising=False)
+    monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_env_only")
+
+    class FakeRemoteKeeper:
+        def __init__(self, api_url, api_key, config, *, project=None):
+            self.api_url = api_url
+            self.api_key = api_key
+            self.config = config
+            self.project = project
+
+        def close(self):
+            pass
+
+    with (
+        patch(
+            "keep.api.Keeper",
+            side_effect=AssertionError("local Keeper must not be constructed"),
+        ),
+        patch("keep.remote.RemoteKeeper", FakeRemoteKeeper),
+    ):
+        from keep.console_support import _get_keeper
+
+        keeper = _get_keeper(store)
+
+    assert isinstance(keeper, FakeRemoteKeeper)
+    assert keeper.api_url == "https://config.example.test"
+    assert keeper.api_key == "kn_env_only"
+    assert keeper.project == "from-file"
+    assert keeper.config.config_dir == store

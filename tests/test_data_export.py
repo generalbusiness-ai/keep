@@ -18,6 +18,7 @@ from keep.cli_app import (
 from keep.markdown_export import _resolve_export_destination
 from keep.config import StoreConfig, ProviderConfig
 from keep.markdown_import import load_markdown_import
+from tests.conftest import _write_test_store_config
 
 
 @pytest.fixture
@@ -1670,10 +1671,147 @@ class TestMarkdownExport:
         assert 'speaker: "[[Joanna]]"' in (out / "sessions" / "one.md").read_text(encoding="utf-8")
         remote_host.close.assert_called_once()
 
-    def test_cli_markdown_sync_uses_remote_export_host(self, tmp_path):
+    def test_cli_remote_json_import_uses_hosted_endpoint(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+        from unittest.mock import patch
+        from keep import cli_app
+        from keep.cli_app import app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        _write_test_store_config(store)
+        with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+            fh.write(
+                "\n[remote]\n"
+                "api_url = \"https://api.example.test\"\n"
+                "api_key = \"kn_test\"\n"
+                "project = \"first-user\"\n"
+            )
+        src = tmp_path / "export.json"
+        src.write_text(json.dumps({
+            "format": "keep-export",
+            "version": 3,
+            "documents": [_make_doc("remote-doc", "remote body")],
+        }))
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_remote_request(method, path, body=None):
+            calls.append((method, path, body))
+            return 200, {
+                "imported": 1,
+                "skipped": 0,
+                "versions": 0,
+                "parts": 0,
+                "queued": 1,
+            }
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+        monkeypatch.setattr(cli_app, "_remote_request", fake_remote_request)
+        monkeypatch.setattr(
+            cli_app,
+            "_daemon_get_port",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("local daemon must not start in remote mode")
+            ),
+        )
+
+        with patch(
+            "keep.api.Keeper",
+            side_effect=AssertionError("local Keeper must not open in remote mode"),
+        ):
+            r = CliRunner().invoke(
+                app,
+                ["--store", str(store), "data", "import", str(src)],
+                catch_exceptions=False,
+            )
+
+        assert r.exit_code == 0, r.output
+        assert calls == [("POST", "/v1/import", {
+            "format": "keep-export",
+            "version": 3,
+            "documents": [_make_doc("remote-doc", "remote body")],
+            "mode": "merge",
+        })]
+        assert "hosted processing" in r.stderr
+
+    def test_cli_remote_markdown_import_uses_hosted_endpoint(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+        from unittest.mock import patch
+        from keep import cli_app
+        from keep.cli_app import app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        _write_test_store_config(store)
+        with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+            fh.write(
+                "\n[remote]\n"
+                "api_url = \"https://api.example.test\"\n"
+                "api_key = \"kn_test\"\n"
+                "project = \"first-user\"\n"
+            )
+        src = tmp_path / "note.md"
+        src.write_text("---\n_id: md-remote\ntopic: hosted\n---\nMarkdown body\n")
+        calls: list[tuple[str, str, dict | None]] = []
+
+        def fake_remote_request(method, path, body=None):
+            calls.append((method, path, body))
+            return 200, {
+                "imported": 1,
+                "skipped": 0,
+                "versions": 0,
+                "parts": 0,
+                "queued": 1,
+            }
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+        monkeypatch.setattr(cli_app, "_remote_request", fake_remote_request)
+        monkeypatch.setattr(
+            cli_app,
+            "_daemon_get_port",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("local daemon must not start in remote mode")
+            ),
+        )
+
+        with patch(
+            "keep.api.Keeper",
+            side_effect=AssertionError("local Keeper must not open in remote mode"),
+        ):
+            r = CliRunner().invoke(
+                app,
+                ["--store", str(store), "data", "import", str(src), "--format", "md"],
+                catch_exceptions=False,
+            )
+
+        assert r.exit_code == 0, r.output
+        assert len(calls) == 1
+        method, path, body = calls[0]
+        assert (method, path) == ("POST", "/v1/import")
+        assert body["mode"] == "merge"
+        assert body["documents"][0]["id"] == "md-remote"
+        assert body["documents"][0]["summary"] == "Markdown body\n"
+
+    def test_cli_markdown_sync_uses_remote_export_host(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
         from unittest.mock import MagicMock, patch
+        from keep import cli_app
         from keep.cli_app import app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        _write_test_store_config(store)
+        with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+            fh.write(
+                "\n[remote]\n"
+                "api_url = \"https://api.example.test\"\n"
+                "api_key = \"kn_test\"\n"
+                "project = \"first-user\"\n"
+            )
 
         class RemoteSyncHost:
             def __init__(self) -> None:
@@ -1737,16 +1875,24 @@ class TestMarkdownExport:
 
         remote_host = RemoteSyncHost()
 
+        def fake_daemon_request(method, port, path, body=None):
+            assert port == 1234
+            assert path == "/v1/admin/markdown-export"
+            if body and body.get("validate_only"):
+                return 200, {"validated": True, "root": str((tmp_path / "vault").resolve())}
+            return 200, {"sync": {"root": str((tmp_path / "vault").resolve())}}
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
         with patch("keep.cli_app._get_export_host", return_value=remote_host), \
-             patch("keep.cli_app._get_port", return_value=1234), \
-             patch("keep.cli_app._daemon_request", side_effect=[
-                 (200, {"validated": True, "root": str((tmp_path / "vault").resolve())}),
-                 (200, {"sync": {"root": str((tmp_path / "vault").resolve())}}),
-             ]) as daemon_request:
+             patch("keep.cli_app._get_local_daemon_port", return_value=1234) as local_port, \
+             patch("keep.cli_app._remote_request", side_effect=AssertionError("remote admin call")), \
+             patch("keep.cli_app._daemon_request", side_effect=fake_daemon_request) as daemon_request:
             r = CliRunner().invoke(
                 app,
                 [
-                    "--store", str(tmp_path), "data", "export",
+                    "--store", str(store), "data", "export",
                     str(tmp_path / "vault"), "--format", "md", "--sync",
                 ],
             )
@@ -1754,9 +1900,95 @@ class TestMarkdownExport:
         assert r.exit_code == 0
         assert (tmp_path / "vault" / "remote-sync-doc.md").is_file()
         assert "Markdown sync active:" in r.output
+        assert local_port.call_count == 2
         register_body = daemon_request.call_args_list[1].args[3]
         assert register_body["source_cursor"] == "42"
         remote_host.close.assert_called_once()
+
+    def test_cli_markdown_sync_list_uses_local_daemon_when_remote_configured(
+        self, tmp_path, monkeypatch,
+    ):
+        from typer.testing import CliRunner
+        from unittest.mock import patch
+        from keep import cli_app
+        from keep.cli_app import app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        _write_test_store_config(store)
+        with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+            fh.write(
+                "\n[remote]\n"
+                "api_url = \"https://api.example.test\"\n"
+                "api_key = \"kn_test\"\n"
+                "project = \"first-user\"\n"
+            )
+        calls: list[tuple[str, int, str, dict | None]] = []
+
+        def fake_daemon_request(method, port, path, body=None):
+            calls.append((method, port, path, body))
+            return 200, {"mirrors": []}
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+        with patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
+             patch("keep.cli_app._remote_request", side_effect=AssertionError("remote admin call")), \
+             patch("keep.cli_app._daemon_request", side_effect=fake_daemon_request):
+            r = CliRunner().invoke(
+                app,
+                ["--store", str(store), "data", "export", "--list"],
+            )
+
+        assert r.exit_code == 0, r.output
+        assert "No markdown sync directories." in r.output
+        assert calls == [("POST", 1234, "/v1/admin/markdown-export", {"list": True})]
+
+    def test_cli_markdown_sync_stop_uses_local_daemon_when_remote_configured(
+        self, tmp_path, monkeypatch,
+    ):
+        from typer.testing import CliRunner
+        from unittest.mock import patch
+        from keep import cli_app
+        from keep.cli_app import app
+
+        store = tmp_path / "store"
+        store.mkdir()
+        _write_test_store_config(store)
+        with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+            fh.write(
+                "\n[remote]\n"
+                "api_url = \"https://api.example.test\"\n"
+                "api_key = \"kn_test\"\n"
+                "project = \"first-user\"\n"
+            )
+        calls: list[tuple[str, int, str, dict | None]] = []
+
+        def fake_daemon_request(method, port, path, body=None):
+            calls.append((method, port, path, body))
+            return 200, {"stopped": True, "root": str(tmp_path / "vault")}
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+        monkeypatch.setattr(cli_app, "_global_store", None)
+        with patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
+             patch("keep.cli_app._remote_request", side_effect=AssertionError("remote admin call")), \
+             patch("keep.cli_app._daemon_request", side_effect=fake_daemon_request):
+            r = CliRunner().invoke(
+                app,
+                [
+                    "--store", str(store), "data", "export",
+                    str(tmp_path / "vault"), "--sync", "--stop",
+                ],
+            )
+
+        assert r.exit_code == 0, r.output
+        assert "Stopped markdown sync:" in r.output
+        assert len(calls) == 1
+        method, port, path, body = calls[0]
+        assert (method, port, path) == ("POST", 1234, "/v1/admin/markdown-export")
+        assert body["stop"] is True
+        assert body["register_only"] is True
 
     def test_cli_json_export_uses_export_host(self, tmp_path):
         from typer.testing import CliRunner
