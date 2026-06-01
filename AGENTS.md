@@ -50,10 +50,15 @@ User-facing terminology:
 - Feature work should be on its own worktree/branch.
 - Do not commit to main, tag, push, or release without explicit user instruction.
 - Major version is zero.  Minor version is updated with feature releases.  Patch version for maintenance.
-- Before any release: if recent work was implementing a written design doc (`later/design/`), ensure that doc reflects the current status.
-- Before any release: review all `docs/` for completeness and accuracy.
-- Before any release: run `ruff check` (on all files) and fix all issues.
-- Use `scripts/release.sh` to release.
+- Use `scripts/release.sh` to release, gated by the checklist below.
+
+**Before any release**
+
+* If recent work was implementing a written design doc (`later/design/`), ensure that doc reflects the current status.
+* Review all `docs/` for completeness and accuracy.
+* Run `ruff check` (on all files) and fix all issues.
+* Check CI for existing alerts.  If found: address them, and re-check by running the CI audit locally.
+* Review all previously-ignored CVEs and other suppressed alerts.
 
 ## Testing
 
