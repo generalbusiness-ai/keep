@@ -69,5 +69,10 @@ jobs:
       - name: Audit dependencies
         run: |
           uv export --frozen --no-hashes --no-emit-project > /tmp/requirements.txt
+          # CVE-2026-45829: chromadb pre-auth RCE on its HTTP server
+          #   (/api/v2/.../collections with trust_remote_code). keep only uses
+          #   chromadb.PersistentClient (embedded, on-disk) and never runs the
+          #   chromadb server, so the endpoint is unreachable. No upstream fix
+          #   exists (all releases 1.0.0-1.5.9 affected).
           pip-audit -r /tmp/requirements.txt --desc \
-            --ignore-vuln CVE-2026-4539  # pygments ReDoS, no fix available, local-only attack
+            --ignore-vuln CVE-2026-45829

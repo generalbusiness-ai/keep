@@ -60,6 +60,9 @@ dependencies = [
     # Security floor: PYSEC-2026-161 (Starlette Host-header URL reconstruction)
     # fixed in 1.0.1. Pulled in transitively by mcp[starlette]/uvicorn.
     "starlette>=1.0.1",
+    # Security floor: CVE-2026-4539 (Pygments GUID-regex ReDoS) fixed in 2.20.0.
+    # Pulled in transitively via rich (typer, pip-audit, chromadb).
+    "pygments>=2.20.0",
     # CEL predicates for state-doc rules
     "common-expression-language>=0.5",
     # Interactive CLI prompts (setup wizard)
