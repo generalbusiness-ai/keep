@@ -1,6 +1,6 @@
 ---
 name: keep
-version: 0.156.1
+version: 0.157.0
 description: Reflective Memory
 homepage: https://github.com/generalbusiness-ai/keep
 runtime: python:3.12-slim

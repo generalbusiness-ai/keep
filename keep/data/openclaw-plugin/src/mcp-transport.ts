@@ -200,7 +200,7 @@ export class KeepMcpTransport {
     this.transport = new StdioClientTransport(launch);
 
     this.client = new Client(
-      { name: "keep-openclaw-plugin", version: "0.156.1" },
+      { name: "keep-openclaw-plugin", version: "0.157.0" },
       { capabilities: {} },
     );
 
