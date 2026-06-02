@@ -150,7 +150,7 @@ def test_render_context_with_similar():
 
 
 def test_data_export_list_prints_markdown_mirrors(capsys):
-    with patch("keep.cli_app._get_port", return_value=1234), \
+    with patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
          patch("keep.cli_app._daemon_request", return_value=(200, {
              "mirrors": [
                  {
@@ -176,7 +176,7 @@ def test_data_export_list_prints_markdown_mirrors(capsys):
 
 
 def test_data_export_list_treats_unknown_daemon_endpoint_as_empty(capsys):
-    with patch("keep.cli_app._get_port", return_value=1234), \
+    with patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
          patch("keep.cli_app._daemon_request", return_value=(404, {"error": "not found"})):
         data_export(output=None, list_sync=True)
 
@@ -189,7 +189,7 @@ def test_data_export_sync_implies_markdown_mode(capsys):
     host = MagicMock()
     with patch("keep.cli_app._get_export_host", return_value=host), \
          patch("keep.markdown_mirrors.run_markdown_export_once", return_value=(12, {})) as run_export, \
-         patch("keep.cli_app._get_port", return_value=1234), \
+         patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
          patch("keep.cli_app._daemon_request", side_effect=[
              (200, {"validated": True, "root": "/tmp/vault"}),
              (200, {"sync": {"root": "/tmp/vault"}}),
@@ -215,7 +215,7 @@ def test_data_export_interval_implies_sync(capsys):
     host = MagicMock()
     with patch("keep.cli_app._get_export_host", return_value=host), \
          patch("keep.markdown_mirrors.run_markdown_export_once", return_value=(5, {})), \
-         patch("keep.cli_app._get_port", return_value=1234), \
+         patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
          patch("keep.cli_app._daemon_request", side_effect=[
              (200, {"validated": True, "root": "/tmp/vault"}),
              (200, {"sync": {"root": "/tmp/vault", "interval": "PT5M"}}),
@@ -238,7 +238,7 @@ def test_data_export_interval_updates_existing_mirror(capsys):
     host = MagicMock()
     with patch("keep.cli_app._get_export_host", return_value=host), \
          patch("keep.markdown_mirrors.run_markdown_export_once", return_value=(0, {})), \
-         patch("keep.cli_app._get_port", return_value=1234), \
+         patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
          patch("keep.cli_app._daemon_request", side_effect=[
              (200, {"validated": True, "root": "/tmp/vault"}),
              (200, {"sync": {"root": "/tmp/vault", "interval": "PT2M"}}),
@@ -250,7 +250,7 @@ def test_data_export_interval_updates_existing_mirror(capsys):
 
 
 def test_data_export_stop_implies_markdown_mode(capsys):
-    with patch("keep.cli_app._get_port", return_value=1234), \
+    with patch("keep.cli_app._get_local_daemon_port", return_value=1234), \
          patch("keep.cli_app._daemon_request", return_value=(200, {"stopped": True})):
         data_export(output="/tmp/vault", sync=True, stop=True)
 

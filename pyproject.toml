@@ -35,7 +35,8 @@ dependencies = [
     # Mistral providers (embeddings, chat, OCR) use the REST API directly via httpx
     # — no mistralai SDK dependency.
     # Document extraction
-    "pyjwt>=2.12.0",
+    # Security floor for PYSEC-2026-175/177/178/179 in PyJWT.
+    "pyjwt>=2.13.0",
     "pypdf>=6.10.0",  # GHSA-3crg-w4f6-42mx and CVE-2026-33699 fixes
     "pypdfium2>=4.0",
     "beautifulsoup4>=4.9",

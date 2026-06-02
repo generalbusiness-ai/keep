@@ -6,6 +6,7 @@ Suppress verbose library output by default for better UX.
 import os
 import sys
 import warnings
+import logging
 
 from .const import (
     CLIENT_LOG_FILE,
@@ -23,37 +24,69 @@ if not os.environ.get("KEEP_VERBOSE"):
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 
+class _HttpxRequestInfoDemoter(logging.Filter):
+    """Treat httpx request summaries as DEBUG diagnostics in verbose mode."""
+
+    _PREFIX = "HTTP Request:"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == "httpx"
+            and record.levelno == logging.INFO
+            and str(record.msg).startswith(self._PREFIX)
+        ):
+            record.levelno = logging.DEBUG
+            record.levelname = logging.getLevelName(logging.DEBUG)
+        return True
+
+
+_HTTPX_REQUEST_INFO_DEMOTER = _HttpxRequestInfoDemoter()
+
+
+def _install_httpx_request_info_demoter() -> None:
+    """Install the httpx request-summary demoter once per process."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _HttpxRequestInfoDemoter) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_HTTPX_REQUEST_INFO_DEMOTER)
+
+
 def configure_quiet_mode(quiet: bool = True):
     """Configure logging to suppress verbose library output.
-    
+
     This silences:
     - HuggingFace transformers progress bars
     - MLX model loading messages
     - Library warnings (deprecation, etc.)
-    
+
     Args:
         quiet: If True, suppress verbose output. If False, show everything.
     """
     if quiet:
+        _install_httpx_request_info_demoter()
+
         # Suppress HuggingFace progress bars and warnings
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         os.environ["TRANSFORMERS_VERBOSITY"] = "error"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        
+
         # Suppress Python warnings (including deprecation warnings)
         warnings.filterwarnings("ignore")
-        
+
         # Configure Python logging to be less verbose
-        import logging
         logging.getLogger("transformers").setLevel(logging.ERROR)
         logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
         logging.getLogger("mlx").setLevel(logging.ERROR)
         logging.getLogger("chromadb").setLevel(logging.ERROR)
+        # httpx emits one INFO record per completed request.  During remote
+        # exports that can interleave with progress-bar rendering, so keep
+        # third-party HTTP chatter out of normal CLI output.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def enable_debug_mode():
     """Enable debug-level logging to stderr."""
-    import logging
+    _install_httpx_request_info_demoter()
 
     # Re-enable warnings
     warnings.filterwarnings("default")
@@ -78,13 +111,20 @@ def enable_debug_mode():
         root_logger.addHandler(handler)
 
     # Set library loggers to DEBUG
-    for name in ("keep", "transformers", "sentence_transformers", "mlx", "chromadb"):
+    for name in (
+        "keep",
+        "transformers",
+        "sentence_transformers",
+        "mlx",
+        "chromadb",
+        "httpx",
+        "httpcore",
+    ):
         logging.getLogger(name).setLevel(logging.DEBUG)
 
 
 def _attach_rotating_handler(log_path):
     """Attach a rotating INFO file handler at log_path to the keep logger."""
-    import logging
     from logging.handlers import RotatingFileHandler
     from pathlib import Path
 
