@@ -187,6 +187,7 @@ from .markdown_export import _get_export_bundle
 from .processors import _content_hash, _content_hash_full, process_analyze
 from .state_doc import parse_state_doc
 from .state_doc_runtime import (
+    FlowCursor,
     FlowResult,
     decode_cursor,
     make_action_runner,

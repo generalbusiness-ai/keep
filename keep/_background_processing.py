@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from .const import OPS_LOG_FILE, WORK_QUEUE_DB
 from .processors import _content_hash
@@ -33,6 +33,9 @@ from .types import (
     utc_now,
 )
 from .tracing import get_tracer
+
+if TYPE_CHECKING:
+    from .state_doc import StateDoc
 
 logger = logging.getLogger(__name__)
 

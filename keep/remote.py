@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote
 
 import httpx
@@ -31,6 +31,12 @@ from .types import (
     Item, ItemContext, SimilarRef, MetaRef, EdgeRef, VersionRef, PartRef,
     TagMap, local_date,
 )
+
+if TYPE_CHECKING:
+    # RemoteConfig is referenced in the resolve_remote_config return annotation;
+    # the runtime import lives inside that function to avoid import ordering
+    # concerns. TYPE_CHECKING keeps it resolvable for static analysis.
+    from .config import RemoteConfig
 
 logger = logging.getLogger(__name__)
 

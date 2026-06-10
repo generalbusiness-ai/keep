@@ -11,11 +11,14 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from keep.types import SYSTEM_TAG_PREFIX, tag_values, utc_now
+
+if TYPE_CHECKING:
+    from keep.document_store import DocumentRecord
 
 _PERF_PHASES_KEY = pytest.StashKey[dict[str, float]]()
 _PERF_OUTCOME_KEY = pytest.StashKey[str]()

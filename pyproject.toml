@@ -147,7 +147,13 @@ target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["D"]
+# D: docstring conventions. F821: undefined-name — catches references to names
+# that aren't in scope, including dead/unreachable code that points at a name
+# that was never bound (ruff 0.15 has no dedicated unreachable-code rule, and
+# F821 is the check that flags that class of bug). The broader Pyflakes `F`
+# group (unused imports/vars) is deliberately not enabled yet — it has a large
+# pre-existing backlog that is a separate cleanup.
+select = ["D", "F821"]
 ignore = [
     "D100",  # Missing docstring in public module
     "D102",  # Missing docstring in public method

@@ -60,6 +60,8 @@ from .utils import _text_content_id
 
 if TYPE_CHECKING:
     from .api import Keeper
+    from .state_doc_runtime import FlowResult
+    from .types import PromptResult
 
 
 def _is_filesystem_path(source: str) -> Optional[Path]:
