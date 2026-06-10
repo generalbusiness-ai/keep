@@ -13,7 +13,7 @@ findings table and the full set of considered/rejected items are below.
 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
 |------|-------|----------|--------|------|------------|--------|
-| 001 | Remove unreachable `return url`; lint for dead code | P1 | S | LOW | — | DONE (dead-code removed + guard test; lint half deferred — see note) |
+| 001 | Remove unreachable `return url`; lint for dead code | P1 | S | LOW | — | DONE (dead-code removed + guard test + ruff F821 enabled — see note) |
 | 002 | Pin GitHub Actions to commit SHAs | P2 | S | LOW | — | DONE |
 | 003 | Fake-server integration test for the remote path | P1 | M | LOW | — | DONE (13 tests) |
 | 004 | Run e2e tests in CI | P2 | S | LOW | — | DONE |
@@ -30,11 +30,15 @@ into `main`. Full suite green afterward: **2563 passed, 1 skipped**; ruff clean;
 e2e (5) green.
 
 - **001**: the dead `return url` was deleted and a guard test added. The lint half
-  (turn on a ruff rule for unreachable code) was **deferred**: the rule that
-  catches it (`F821`, undefined-name) also flags ~11 pre-existing forward-reference
-  string annotations across 9 files. Mass-fixing those is a separate maintainer
-  decision, so `pyproject.toml` was left unchanged. The dead-code removal (the
-  finding) is complete.
+  is now **also done**: ruff 0.15 has no dedicated unreachable-code rule, but
+  `F821` (undefined-name) catches the bug class (dead/typo'd code referencing a
+  name that was never bound — exactly what `return url` was). Enabling it required
+  first resolving the 11 pre-existing forward-reference annotations it flagged
+  (`StateDoc`, `FlowCursor`, `FlowResult`, `PromptResult`, `RemoteConfig`,
+  `DocumentRecord`, plus `Callable`/`Any`) — all fixed with `TYPE_CHECKING` imports
+  or plain typing imports (zero runtime/circular-import impact). `pyproject.toml`
+  now selects `["D", "F821"]`. The broader Pyflakes `F` group (137 unused-import +
+  39 unused-var + …, 206 total) is deliberately left for a separate cleanup.
 - **006**: the agent implemented the *full* surface (CLI `--deep-depth`, daemon
   `FindRequest.deep_follow_depth`, remote, flow, state-doc) rather than the minimal
   internal knob the plan floated. Complete, consistent, default-preserving,
