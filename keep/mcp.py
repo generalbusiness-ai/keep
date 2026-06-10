@@ -42,7 +42,7 @@ from ._context_resolution import _SUPPORTED_MCP_PROMPT_ARGS
 from .config import RemoteConfig
 from .daemon_client import get_port, http_request_with_discovery_retry
 from .help import get_help_topic
-from .logging_config import configure_client_log
+from .logging_config import ClientCallLogger
 
 logger = logging.getLogger(__name__)
 
@@ -143,18 +143,7 @@ class _RemoteBackend(_MCPBackend):
         )
         # Attach the client-side ops log so MCP tool traffic produces an
         # on-disk audit trail in remote mode. Failures are non-fatal.
-        self._log_handler = None
-        if log_dir is not None:
-            try:
-                self._log_handler = configure_client_log(log_dir)
-            except OSError as e:
-                logger.debug("Could not attach client log at %s: %s", log_dir, e)
-
-    def _log_call(self, method: str, path: str, status: int, wall_ms: int) -> None:
-        logger.info(
-            "mcp.remote: %s %s status=%d wall=%dms host=%s",
-            method, path, status, wall_ms, self._api_url,
-        )
+        self._call_logger = ClientCallLogger(log_dir, "mcp.remote", self._api_url)
 
     def _do(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, dict]:
         import httpx
@@ -166,16 +155,19 @@ class _RemoteBackend(_MCPBackend):
                 resp = self._client.request(method, path, json=body)
         except httpx.HTTPError as e:
             wall_ms = int((time.monotonic() - start) * 1000)
-            self._log_call(method, path, 0, wall_ms)
+            self._call_logger.log_call(method, path, 0, wall_ms)
             return 0, {"error": str(e)}
         wall_ms = int((time.monotonic() - start) * 1000)
-        self._log_call(method, path, resp.status_code, wall_ms)
         try:
             data = resp.json()
             if not isinstance(data, dict):
                 data = {"value": data}
         except ValueError:
             data = {"error": resp.text}
+        self._call_logger.log_call(
+            method, path, resp.status_code, wall_ms,
+            request_id=data.get("request_id", "") if isinstance(data, dict) else "",
+        )
         return resp.status_code, data
 
     def post(self, path: str, body: dict) -> tuple[int, dict]:
@@ -189,13 +181,7 @@ class _RemoteBackend(_MCPBackend):
             self._client.close()
         except Exception:
             pass
-        if self._log_handler is not None:
-            try:
-                logging.getLogger("keep").removeHandler(self._log_handler)
-                self._log_handler.close()
-            except Exception:
-                pass
-            self._log_handler = None
+        self._call_logger.close()
 
 
 def _load_remote_config() -> tuple[Optional[RemoteConfig], Optional[Any]]:

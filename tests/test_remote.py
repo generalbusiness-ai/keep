@@ -85,6 +85,53 @@ def test_remote_close_removes_client_log_handler(tmp_path):
     assert keeper._client_log_handler is None
 
 
+def test_remote_client_log_includes_request_id(tmp_path):
+    """keep-client.log includes request_id= when the response body carries one."""
+    config = StoreConfig(path=tmp_path, config_dir=tmp_path)
+    keeper = RemoteKeeper("http://localhost:9999", "kn_test", config)
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "id": "abc", "summary": "", "tags": {}, "request_id": "req-corr-01"
+    }
+    keeper._client = MagicMock()
+    keeper._client.get.return_value = mock_response
+
+    try:
+        keeper._get("/v1/notes/abc")
+    finally:
+        keeper.close()
+
+    log_path = tmp_path / "keep-client.log"
+    assert log_path.exists()
+    body = log_path.read_text(encoding="utf-8")
+    assert "remote: GET /v1/notes/abc" in body
+    assert "request_id=req-corr-01" in body
+
+
+def test_remote_get_nonjson_error_body_raises_httpstatuserror(tmp_path):
+    """A non-JSON error body must still raise HTTPStatusError, not JSONDecodeError.
+
+    Building the audit-log line is best-effort: extracting request_id must never
+    change the exception surface.  When a gateway/proxy returns a 502 with a
+    plain-text body, ``_safe_request_id`` swallows the parse failure and
+    ``_raise_for_status`` produces the clean HTTPStatusError callers expect.
+    """
+    config = StoreConfig(path=tmp_path, config_dir=tmp_path)
+    keeper = RemoteKeeper("http://localhost:9999", "kn_test", config)
+    request = httpx.Request("GET", "http://localhost:9999/v1/notes/x")
+    resp = httpx.Response(502, text="Bad Gateway", request=request)
+    keeper._client = MagicMock()
+    keeper._client.get.return_value = resp
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            keeper._get("/v1/notes/x")
+    finally:
+        keeper.close()
+
+
 def test_get_keeper_toml_remote_does_not_construct_local_keeper(tmp_path, monkeypatch):
     """TOML [remote] is authoritative before any local startup work can queue."""
     store = tmp_path / "store"

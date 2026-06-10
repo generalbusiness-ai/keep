@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from .config import StoreConfig
-from .logging_config import configure_client_log
+from .logging_config import ClientCallLogger
 from .flow_client import (
     delete_item as flow_delete_item,
     find_items as flow_find_items,
@@ -157,16 +157,16 @@ class RemoteKeeper:
         # (config_dir is where keep.toml lives and is always writable), else
         # fall back to the store path. Failures are non-fatal — clients that
         # disable filesystem access (tests, MCPB sandboxing) still work.
-        self._client_log_handler = None
         log_dir = (
             config.config_dir if config and config.config_dir
             else (config.path if config and config.path else None)
         )
-        if log_dir is not None:
-            try:
-                self._client_log_handler = configure_client_log(log_dir)
-            except OSError as e:
-                logger.debug("Could not attach client log at %s: %s", log_dir, e)
+        self._call_logger = ClientCallLogger(log_dir, "remote", self.api_url)
+
+    @property
+    def _client_log_handler(self):
+        """Expose the rotating log handler for tests that inspect it directly."""
+        return self._call_logger.handler
 
     # -- HTTP helpers --
 
@@ -174,18 +174,31 @@ class RemoteKeeper:
     def _q(id: str) -> str:
         return quote(id, safe="")
 
-    def _log_call(self, method: str, path: str, status: int, wall_ms: int) -> None:
-        """Emit a single-line INFO record per remote HTTP call."""
-        logger.info(
-            "remote: %s %s status=%d wall=%dms host=%s",
-            method, path, status, wall_ms, self.api_url,
-        )
+    @staticmethod
+    def _safe_request_id(resp: httpx.Response) -> str:
+        """Best-effort daemon request_id for the audit log line; '' if absent.
+
+        Parsing here must never change the exception surface: a non-JSON error
+        body (proxy/gateway 502/504, an auth layer) must still raise a clean
+        ``HTTPStatusError`` (with request_id when present) via
+        ``_raise_for_status`` — not a ``JSONDecodeError`` thrown while building
+        the log line.  So this swallows parse failures and returns "".
+        """
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            return ""
+        return str(data.get("request_id", "")) if isinstance(data, dict) else ""
 
     def _get(self, path: str, **params: Any) -> dict:
         filtered = {k: v for k, v in params.items() if v is not None}
         start = time.monotonic()
         resp = self._client.get(path, params=filtered)
-        self._log_call("GET", path, resp.status_code, int((time.monotonic() - start) * 1000))
+        self._call_logger.log_call(
+            "GET", path, resp.status_code,
+            int((time.monotonic() - start) * 1000),
+            request_id=self._safe_request_id(resp),
+        )
         self._raise_for_status(resp)
         return resp.json()
 
@@ -193,21 +206,33 @@ class RemoteKeeper:
         filtered = {k: v for k, v in json.items() if v is not None}
         start = time.monotonic()
         resp = self._client.post(path, json=filtered)
-        self._log_call("POST", path, resp.status_code, int((time.monotonic() - start) * 1000))
+        self._call_logger.log_call(
+            "POST", path, resp.status_code,
+            int((time.monotonic() - start) * 1000),
+            request_id=self._safe_request_id(resp),
+        )
         self._raise_for_status(resp)
         return resp.json()
 
     def _patch(self, path: str, json: dict) -> dict:
         start = time.monotonic()
         resp = self._client.patch(path, json=json)
-        self._log_call("PATCH", path, resp.status_code, int((time.monotonic() - start) * 1000))
+        self._call_logger.log_call(
+            "PATCH", path, resp.status_code,
+            int((time.monotonic() - start) * 1000),
+            request_id=self._safe_request_id(resp),
+        )
         self._raise_for_status(resp)
         return resp.json()
 
     def _delete(self, path: str) -> dict:
         start = time.monotonic()
         resp = self._client.delete(path)
-        self._log_call("DELETE", path, resp.status_code, int((time.monotonic() - start) * 1000))
+        self._call_logger.log_call(
+            "DELETE", path, resp.status_code,
+            int((time.monotonic() - start) * 1000),
+            request_id=self._safe_request_id(resp),
+        )
         self._raise_for_status(resp)
         return resp.json()
 
@@ -563,10 +588,4 @@ class RemoteKeeper:
 
     def close(self) -> None:
         self._client.close()
-        if self._client_log_handler is not None:
-            try:
-                logging.getLogger("keep").removeHandler(self._client_log_handler)
-                self._client_log_handler.close()
-            except Exception:
-                pass
-            self._client_log_handler = None
+        self._call_logger.close()
