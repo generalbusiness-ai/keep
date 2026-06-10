@@ -145,6 +145,7 @@ def _assert_public_flow_roundtrip(client, calls: list[tuple[str, dict[str, Any]]
             "include_hidden": True,
             "scope": None,
             "deep": False,
+            "deep_follow_depth": 10,
         },
         writable=False,
         has_state_doc_yaml=True,
