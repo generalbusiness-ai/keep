@@ -171,3 +171,88 @@ def configure_client_log(log_dir):
     """
     from pathlib import Path
     return _attach_rotating_handler(Path(log_dir) / CLIENT_LOG_FILE)
+
+
+class ClientCallLogger:
+    """Shared remote-call logging lifecycle for RemoteKeeper and _RemoteBackend.
+
+    Owns three concerns so neither client needs to duplicate them:
+    - handler attach (rotating file at {log_dir}/keep-client.log)
+    - a single standardised INFO line per HTTP call, including optional request_id
+    - handler detach on close
+
+    The emitted line format is::
+
+        remote: <METHOD> <path> status=<n> wall=<ms>ms host=<url>[ request_id=<id>]
+
+    The ``request_id=`` field is appended only when a non-empty value is
+    supplied, so existing log assertions that don't expect it remain valid.
+
+    This class must NOT import keep.remote or keep.mcp — it lives in
+    logging_config to avoid circular imports.
+    """
+
+    def __init__(self, log_dir, prefix: str, host: str) -> None:
+        """Attach the rotating handler and record the log-line prefix and host.
+
+        Args:
+            log_dir: Directory in which to create keep-client.log, or None to
+                     skip handler attachment (tests, sandboxed environments).
+            prefix:  Token that precedes the METHOD in each log line, e.g.
+                     ``"remote"`` or ``"mcp.remote"``.
+            host:    The API base URL emitted as the ``host=`` field.
+        """
+        self._prefix = prefix
+        self._host = host
+        self._handler = None
+        if log_dir is not None:
+            try:
+                self._handler = configure_client_log(log_dir)
+            except OSError as e:
+                logging.getLogger("keep").debug(
+                    "Could not attach client log at %s: %s", log_dir, e
+                )
+
+    @property
+    def handler(self):
+        """The attached RotatingFileHandler, or None if not attached."""
+        return self._handler
+
+    def log_call(
+        self,
+        method: str,
+        path: str,
+        status: int,
+        wall_ms: int,
+        request_id: str = "",
+    ) -> None:
+        """Emit one INFO line for a completed remote HTTP call.
+
+        Args:
+            method:     HTTP verb (GET, POST, PATCH, DELETE, …).
+            path:       Request path.
+            status:     HTTP status code (0 for transport errors).
+            wall_ms:    Elapsed wall-clock milliseconds.
+            request_id: Optional daemon request correlation id.  When non-empty
+                        it is appended as ``request_id=<value>``.
+        """
+        if request_id:
+            logging.getLogger("keep").info(
+                "%s: %s %s status=%d wall=%dms host=%s request_id=%s",
+                self._prefix, method, path, status, wall_ms, self._host, request_id,
+            )
+        else:
+            logging.getLogger("keep").info(
+                "%s: %s %s status=%d wall=%dms host=%s",
+                self._prefix, method, path, status, wall_ms, self._host,
+            )
+
+    def close(self) -> None:
+        """Detach and close the rotating handler."""
+        if self._handler is not None:
+            try:
+                logging.getLogger("keep").removeHandler(self._handler)
+                self._handler.close()
+            except Exception:
+                pass
+            self._handler = None
