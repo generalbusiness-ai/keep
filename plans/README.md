@@ -13,15 +13,39 @@ findings table and the full set of considered/rejected items are below.
 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
 |------|-------|----------|--------|------|------------|--------|
-| 001 | Remove unreachable `return url`; lint for dead code | P1 | S | LOW | — | TODO |
-| 002 | Pin GitHub Actions to commit SHAs | P2 | S | LOW | — | TODO |
-| 003 | Fake-server integration test for the remote path | P1 | M | LOW | — | TODO |
-| 004 | Run e2e tests in CI | P2 | S | LOW | — | TODO |
-| 005 | Verify + regression-test the lock-free SQLite read path | P3 | M | MED | — | TODO |
-| 006 | Expose deep-follow depth as a parameter | P3 | S | LOW | — | TODO |
-| 007 | Consolidate remote client-log lifecycle + request_id | P3 | M | MED | — | TODO |
+| 001 | Remove unreachable `return url`; lint for dead code | P1 | S | LOW | — | DONE (dead-code removed + guard test; lint half deferred — see note) |
+| 002 | Pin GitHub Actions to commit SHAs | P2 | S | LOW | — | DONE |
+| 003 | Fake-server integration test for the remote path | P1 | M | LOW | — | DONE (13 tests) |
+| 004 | Run e2e tests in CI | P2 | S | LOW | — | DONE |
+| 005 | Verify + regression-test the lock-free SQLite read path | P3 | M | MED | — | DONE (read path already lock-free; regression test added) |
+| 006 | Expose deep-follow depth as a parameter | P3 | S | LOW | — | DONE (full surface: CLI/daemon/remote — broader than the minimal scope the plan suggested) |
+| 007 | Consolidate remote client-log lifecycle + request_id | P3 | M | MED | — | DONE (reviewer fixed an error-path regression; see note) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
+
+### Implementation notes (2026-06-10)
+
+All seven implemented by Sonnet agents in isolated worktrees, reviewed and merged
+into `main`. Full suite green afterward: **2563 passed, 1 skipped**; ruff clean;
+e2e (5) green.
+
+- **001**: the dead `return url` was deleted and a guard test added. The lint half
+  (turn on a ruff rule for unreachable code) was **deferred**: the rule that
+  catches it (`F821`, undefined-name) also flags ~11 pre-existing forward-reference
+  string annotations across 9 files. Mass-fixing those is a separate maintainer
+  decision, so `pyproject.toml` was left unchanged. The dead-code removal (the
+  finding) is complete.
+- **006**: the agent implemented the *full* surface (CLI `--deep-depth`, daemon
+  `FindRequest.deep_follow_depth`, remote, flow, state-doc) rather than the minimal
+  internal knob the plan floated. Complete, consistent, default-preserving,
+  clamped [1,100], well-tested. A wire-contract test in `test_flow_host_interface.py`
+  (outside the agent's `-k` filter) needed its expected `find` params updated to
+  include `deep_follow_depth: 10` — caught by the full-suite merge gate and fixed.
+- **007**: review caught a regression — the refactor moved `resp.json()` ahead of
+  `_raise_for_status` in `_get/_post/_patch/_delete`, so a non-JSON error body
+  (gateway 502/504) would raise `JSONDecodeError` instead of the clean
+  `HTTPStatusError`. The reviewer added a guarded `_safe_request_id` helper
+  (restoring raise-before-parse) plus a regression test for the non-JSON error path.
 
 ## Recommended order & dependency notes
 
