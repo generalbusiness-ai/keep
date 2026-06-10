@@ -215,6 +215,28 @@ class TestResolveRemoteConfig:
         assert remote.api_key == "kn_env"
         assert remote.project is None
 
+    def test_env_only_returns_remote_config_not_url_string(self, monkeypatch):
+        """resolve_remote_config must return a RemoteConfig object, not a bare URL string.
+
+        Guard against a regression where a stray ``return url`` statement (with
+        ``url`` undefined in this scope) was present after the real return.  The
+        real return is ``return RemoteConfig(...)``, so the result must always be
+        a RemoteConfig instance, never a str.
+        """
+        from keep.config import RemoteConfig
+        from keep.remote import resolve_remote_config
+
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        monkeypatch.delenv("KEEPNOTES_API_URL", raising=False)
+        monkeypatch.delenv("KEEPNOTES_PROJECT", raising=False)
+        monkeypatch.setenv("KEEPNOTES_API_KEY", "kn_guard")
+        result = resolve_remote_config(None)
+        assert isinstance(result, RemoteConfig), (
+            f"resolve_remote_config must return a RemoteConfig, got {type(result)!r}"
+        )
+        assert result.api_url == "https://api.keepnotes.ai"
+        assert result.api_key == "kn_guard"
+
     def test_env_overlays_toml_per_field(self, monkeypatch):
         """KEEPNOTES_API_KEY alone keeps TOML api_url/project."""
         from keep.config import RemoteConfig, StoreConfig
