@@ -57,6 +57,7 @@ _COMPAT_FIND = dedent(
           include_self: "{params.include_self}"
           include_hidden: "{params.include_hidden}"
           deep: "{params.deep}"
+          deep_follow_depth: "{params.deep_follow_depth}"
           scope: "{params.scope}"
       - return:
           status: done
@@ -251,6 +252,7 @@ def find_items(
     include_self: bool = False,
     include_hidden: bool = False,
     deep: bool = False,
+    deep_follow_depth: int = 10,
     scope: Optional[str] = None,
 ) -> list[Item]:
     if not query and not similar_to and not deep:
@@ -290,6 +292,7 @@ def find_items(
                 "include_hidden": include_hidden,
                 "scope": scope,
                 "deep": deep,
+                "deep_follow_depth": deep_follow_depth,
             },
             writable=False,
             state_doc_yaml=_COMPAT_FIND,

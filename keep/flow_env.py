@@ -37,6 +37,7 @@ class FlowRuntimeEnv(Protocol):
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: str | None = None,
     ) -> list[Any]: ...
 
@@ -58,6 +59,7 @@ class FlowRuntimeEnv(Protocol):
         source_ids: list[str],
         *,
         limit_per_source: int = 5,
+        deep_follow_depth: int = 10,
     ) -> dict[str, list[Any]]: ...
 
     def get_context(
@@ -230,6 +232,7 @@ class LocalFlowEnvironment:
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: str | None = None,
     ) -> list[Any]:
         # See `get()` above: the runtime uses `_find_direct` when available so
@@ -249,6 +252,7 @@ class LocalFlowEnvironment:
             include_self=include_self,
             include_hidden=include_hidden,
             deep=deep,
+            deep_follow_depth=deep_follow_depth,
             scope=scope,
         )
 
@@ -389,10 +393,15 @@ class LocalFlowEnvironment:
         source_ids: list[str],
         *,
         limit_per_source: int = 5,
+        deep_follow_depth: int = 10,
     ) -> dict[str, list[Any]]:
         from .utils import _record_to_item
 
         limit = max(int(limit_per_source), 1)
+        # Clamp deep_follow_depth to a reasonable range so callers cannot
+        # trigger runaway fan-out by requesting an excessively large window.
+        _MAX_DEEP_FOLLOW_DEPTH = 100
+        follow_depth = max(1, min(int(deep_follow_depth), _MAX_DEEP_FOLLOW_DEPTH))
         doc_coll = self._keeper._resolve_doc_collection()
         ds = self._keeper._document_store
 
@@ -480,6 +489,7 @@ class LocalFlowEnvironment:
                     chroma_coll,
                     doc_coll,
                     embedding=self._query_embedding,
+                    top_k=follow_depth,
                     max_per_group=limit,
                 )
                 if isinstance(tag_groups, dict):

@@ -186,6 +186,7 @@ class FindRequest(_RequestBody):
     include_self: StrictBool = False
     include_hidden: StrictBool = False
     deep: StrictBool = False
+    deep_follow_depth: StrictInt = 10
     scope: str | None = None
 
 
@@ -837,6 +838,7 @@ class DaemonRequestHandler(BaseHTTPRequestHandler):
             include_self=req.include_self,
             include_hidden=req.include_hidden,
             deep=req.deep,
+            deep_follow_depth=req.deep_follow_depth,
             scope=req.scope,
         )
         resp = _items_response(results)

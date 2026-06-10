@@ -676,6 +676,7 @@ class SearchAugmentationMixin:
         query: str,
         limit: int = 10,
         deep_limit: int = 5,
+        deep_follow_depth: int = 10,
         embedding: Any = None,
     ) -> dict[str, list[Item]]:
         """Run the find-deep state-doc flow for deep follow.
@@ -683,6 +684,15 @@ class SearchAugmentationMixin:
         Used as the tag-follow fallback when the store has no edges.
         The find-deep flow runs a search then traverses the results,
         exercising the CEL predicate ``search.count == 0``.
+
+        Args:
+            query: Search query string.
+            limit: Max primary results to fetch.
+            deep_limit: Max deep items per primary group.
+            deep_follow_depth: How many primary items contribute tags to the
+                Tier-2 tag-follow step.  Defaults to 10; clamped by
+                ``traverse_related``.
+            embedding: Query embedding for semantic tiebreaking.
         """
         if not query:
             return {}
@@ -693,6 +703,7 @@ class SearchAugmentationMixin:
                 "query": query,
                 "limit": limit,
                 "deep_limit": deep_limit,
+                "deep_follow_depth": deep_follow_depth,
             },
             query_embedding=embedding,
         )
