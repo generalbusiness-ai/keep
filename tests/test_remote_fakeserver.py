@@ -505,6 +505,26 @@ def test_server_info_and_capabilities(keeper, fake_server):
     assert len(ready_requests) == 1
 
 
+def test_direct_calls_are_logged(fake_server, tmp_path):
+    """Non-CRUD remote calls (server_info, export_bundle) also hit the audit log.
+
+    Regression guard: all remote HTTP traffic routes through RemoteKeeper._request,
+    so direct calls — not just _get/_post — produce a keep-client.log line with
+    request correlation. Previously server_info()/export_* bypassed the logger.
+    """
+    config = StoreConfig(path=tmp_path, config_dir=tmp_path)
+    keeper = RemoteKeeper(fake_server.base_url, "kn_test_fake", config)
+    try:
+        keeper.server_info()          # GET /v1/ready — was bypassing the logger
+        keeper.export_bundle("note-1")  # GET /v1/export/bundles/... — likewise
+    finally:
+        keeper.close()
+
+    body = (tmp_path / "keep-client.log").read_text(encoding="utf-8")
+    assert "remote: GET /v1/ready" in body
+    assert "remote: GET /v1/export/bundles/note-1" in body
+
+
 def test_export_iter_streams_ndjson(keeper, fake_server):
     """export_iter() reads GET /v1/export as ndjson and yields item dicts."""
     rows = list(keeper.export_iter())
@@ -551,11 +571,9 @@ def test_client_log_contains_audit_trail(fake_server, tmp_path):
     _get call through the live httpx client, the rotating log file must exist
     and contain the expected prefixes.
 
-    Note: server_info() calls self._client.get() directly and does NOT go
-    through _get() / _log_call(), so GET /v1/ready does not appear in the log.
-    The _log_call audit trail is only wired in the _get/_post/_patch/_delete
-    helpers.  We exercise _get here by calling it directly alongside _post
-    (via put).
+    All remote HTTP calls route through RemoteKeeper._request, so every call —
+    CRUD helpers and direct ones like server_info() — emits a log line.  Here we
+    exercise _get directly alongside _post (via put) and assert both appear.
     """
     config = StoreConfig(path=tmp_path, config_dir=tmp_path)
     keeper = RemoteKeeper(fake_server.base_url, "kn_test_fake", config)

@@ -218,6 +218,32 @@ class TestTraverseActionDepth:
             f"Expected default 10, got {captured['deep_follow_depth']}"
         )
 
+    @pytest.mark.parametrize("bad_value", [None, "bad", "", [], {}])
+    def test_traverse_action_invalid_depth_falls_back_to_ten(self, bad_value):
+        """A None/non-numeric deep_follow_depth must not error the binding.
+
+        State-doc params can be user-supplied or templated; the traverse action
+        parses defensively and falls back to 10 rather than raising before the
+        env's clamp runs.  Mirrors the find action's behaviour.
+        """
+        from keep.actions.traverse import Traverse
+
+        captured: dict = {}
+
+        class FakeContext:
+            def traverse(self, source_ids, *, limit, deep_follow_depth=10):
+                captured["deep_follow_depth"] = deep_follow_depth
+                return {}
+
+        action = Traverse()
+        fake_item = {"id": "src", "summary": "test", "tags": {}}
+        # Must not raise.
+        action.run(
+            {"items": [fake_item], "limit": 5, "deep_follow_depth": bad_value},
+            FakeContext(),
+        )
+        assert captured["deep_follow_depth"] == 10
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: find action deep_follow_depth extraction and clamping

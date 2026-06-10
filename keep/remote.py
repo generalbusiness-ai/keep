@@ -196,49 +196,43 @@ class RemoteKeeper:
             return ""
         return str(data.get("request_id", "")) if isinstance(data, dict) else ""
 
-    def _get(self, path: str, **params: Any) -> dict:
-        filtered = {k: v for k, v in params.items() if v is not None}
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Issue an HTTP call and emit the client-log line — without raising.
+
+        Centralises timing + ``ClientCallLogger`` emission so EVERY remote call
+        lands in keep-client.log with request-id correlation, not just the
+        ``_get``/``_post`` CRUD helpers.  Callers own status handling (e.g.
+        ``404 -> None``) and call ``_raise_for_status`` themselves when they want
+        the standard error behaviour.
+        """
         start = time.monotonic()
-        resp = self._client.get(path, params=filtered)
+        resp = self._client.request(method, path, **kwargs)
         self._call_logger.log_call(
-            "GET", path, resp.status_code,
+            method, path, resp.status_code,
             int((time.monotonic() - start) * 1000),
             request_id=self._safe_request_id(resp),
         )
+        return resp
+
+    def _get(self, path: str, **params: Any) -> dict:
+        filtered = {k: v for k, v in params.items() if v is not None}
+        resp = self._request("GET", path, params=filtered)
         self._raise_for_status(resp)
         return resp.json()
 
     def _post(self, path: str, json: dict) -> dict:
         filtered = {k: v for k, v in json.items() if v is not None}
-        start = time.monotonic()
-        resp = self._client.post(path, json=filtered)
-        self._call_logger.log_call(
-            "POST", path, resp.status_code,
-            int((time.monotonic() - start) * 1000),
-            request_id=self._safe_request_id(resp),
-        )
+        resp = self._request("POST", path, json=filtered)
         self._raise_for_status(resp)
         return resp.json()
 
     def _patch(self, path: str, json: dict) -> dict:
-        start = time.monotonic()
-        resp = self._client.patch(path, json=json)
-        self._call_logger.log_call(
-            "PATCH", path, resp.status_code,
-            int((time.monotonic() - start) * 1000),
-            request_id=self._safe_request_id(resp),
-        )
+        resp = self._request("PATCH", path, json=json)
         self._raise_for_status(resp)
         return resp.json()
 
     def _delete(self, path: str) -> dict:
-        start = time.monotonic()
-        resp = self._client.delete(path)
-        self._call_logger.log_call(
-            "DELETE", path, resp.status_code,
-            int((time.monotonic() - start) * 1000),
-            request_id=self._safe_request_id(resp),
-        )
+        resp = self._request("DELETE", path)
         self._raise_for_status(resp)
         return resp.json()
 
@@ -316,6 +310,7 @@ class RemoteKeeper:
         return flow_get_item(self, id)
 
     def export_iter(self, *, include_system: bool = True):
+        start = time.monotonic()
         with self._client.stream(
             "GET",
             "/v1/export",
@@ -324,6 +319,12 @@ class RemoteKeeper:
                 "stream": "ndjson",
             },
         ) as resp:
+            # Log time-to-response-headers. No request_id: the body is streamed
+            # (ndjson) and must not be consumed here to extract one.
+            self._call_logger.log_call(
+                "GET", "/v1/export", resp.status_code,
+                int((time.monotonic() - start) * 1000),
+            )
             self._raise_for_status(resp)
             content_type = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
             if content_type == "application/x-ndjson":
@@ -365,7 +366,8 @@ class RemoteKeeper:
         include_parts: bool = True,
         include_versions: bool = True,
     ) -> dict | None:
-        resp = self._client.get(
+        resp = self._request(
+            "GET",
             f"/v1/export/bundles/{self._q(id)}",
             params={
                 "include_system": str(include_system).lower(),
@@ -387,7 +389,8 @@ class RemoteKeeper:
         cursor: str | None = None,
         limit: int = 1000,
     ) -> dict:
-        resp = self._client.get(
+        resp = self._request(
+            "GET",
             "/v1/export/changes",
             params={
                 "cursor": cursor or "0",
@@ -533,7 +536,7 @@ class RemoteKeeper:
         }
         if version is not None:
             params["version"] = version
-        resp = self._client.get(f"/v1/notes/{self._q(id)}/context", params=params)
+        resp = self._request("GET", f"/v1/notes/{self._q(id)}/context", params=params)
         if resp.status_code == 404:
             return None
         self._raise_for_status(resp)
@@ -566,7 +569,7 @@ class RemoteKeeper:
 
     def count(self) -> int:
         try:
-            resp = self._client.get("/v1/health")
+            resp = self._request("GET", "/v1/health")
             if resp.status_code == 200:
                 return resp.json().get("item_count", 0)
         except Exception:
@@ -576,7 +579,7 @@ class RemoteKeeper:
     def server_info(self, *, refresh: bool = False) -> dict[str, Any]:
         if self._server_info_cache is not None and not refresh:
             return dict(self._server_info_cache)
-        resp = self._client.get("/v1/ready")
+        resp = self._request("GET", "/v1/ready")
         self._raise_for_status(resp)
         data = resp.json()
         if not isinstance(data, dict):

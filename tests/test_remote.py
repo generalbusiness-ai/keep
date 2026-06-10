@@ -52,8 +52,8 @@ def test_remote_attaches_client_log_to_config_dir(tmp_path):
     mock_response.status_code = 200
     mock_response.json.return_value = {"id": "abc", "summary": "", "tags": {}}
     keeper._client = MagicMock()
-    keeper._client.get.return_value = mock_response
-    keeper._client.post.return_value = mock_response
+    # All remote calls funnel through self._client.request via _request().
+    keeper._client.request.return_value = mock_response
 
     try:
         keeper._get("/v1/notes/abc")
@@ -96,7 +96,7 @@ def test_remote_client_log_includes_request_id(tmp_path):
         "id": "abc", "summary": "", "tags": {}, "request_id": "req-corr-01"
     }
     keeper._client = MagicMock()
-    keeper._client.get.return_value = mock_response
+    keeper._client.request.return_value = mock_response
 
     try:
         keeper._get("/v1/notes/abc")
@@ -123,7 +123,7 @@ def test_remote_get_nonjson_error_body_raises_httpstatuserror(tmp_path):
     request = httpx.Request("GET", "http://localhost:9999/v1/notes/x")
     resp = httpx.Response(502, text="Bad Gateway", request=request)
     keeper._client = MagicMock()
-    keeper._client.get.return_value = resp
+    keeper._client.request.return_value = resp
 
     try:
         with pytest.raises(httpx.HTTPStatusError):

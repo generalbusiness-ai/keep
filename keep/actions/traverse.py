@@ -22,8 +22,15 @@ class Traverse:
             raise ValueError("traverse requires non-empty items list")
         limit = max(int(params.get("limit", 5)), 1)
         # deep_follow_depth controls how many primary items contribute tags to
-        # the Tier-2 tag-follow fallback.  Defaults to 10; clamped in the env.
-        deep_follow_depth = int(params.get("deep_follow_depth", 10))
+        # the Tier-2 tag-follow fallback.  State-doc params can be user-supplied
+        # or templated (None / "bad"), so parse defensively and fall back to 10
+        # rather than turning the traverse binding into an action error before
+        # the env's [1, 100] clamp runs.  Matches Find's parsing.
+        _raw_depth = params.get("deep_follow_depth")
+        try:
+            deep_follow_depth = int(_raw_depth) if _raw_depth is not None else 10
+        except (TypeError, ValueError):
+            deep_follow_depth = 10
 
         source_ids: list[str] = []
         for raw in raw_items:
