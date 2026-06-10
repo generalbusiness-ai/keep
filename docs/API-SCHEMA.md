@@ -170,6 +170,7 @@ Search memory by meaning. Returns items ranked by semantic similarity with recen
 | `since` | string | no | none | Time filter (see Time Filters) |
 | `until` | string | no | none | Time filter (see Time Filters) |
 | `deep` | bool | no | false | Follow tags and edges to discover related items beyond direct matches |
+| `deep_follow_depth` | int | no | 10 | With `deep`: how many top primary results contribute tags/edges to the follow (clamped to 1–100) |
 | `limit` | int | no | 10 | Maximum results |
 
 **Returns:** Formatted list of results, one per line:
@@ -354,6 +355,7 @@ Signature comes from `Keeper.render_prompt()` in `keep/_context_resolution.py`.
 | `tags` | `{str: str}` | no | none | Tag filter for search context |
 | `limit` | int | no | 10 | Max search results |
 | `deep` | bool | no | false | Follow tags/edges to discover related items |
+| `deep_follow_depth` | int | no | 10 | With `deep`: how many top primary results contribute tags/edges to the follow (clamped to 1–100) |
 | `scope` | string | no | none | ID glob to constrain search results |
 | `token_budget` | int | no | template default | Token budget for rendered context |
 

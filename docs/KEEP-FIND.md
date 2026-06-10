@@ -19,6 +19,7 @@ keep find --id ID                     # Find notes similar to an existing note
 | `--since DURATION` | Only notes updated since (see time filtering below) |
 | `--until DURATION` | Only notes updated before (see time filtering below) |
 | `-D`, `--deep` | Follow tags/edges from results to discover related notes |
+| `--deep-depth N` | How many primary results contribute tags/edges to `--deep` follow (default 10, max 100) |
 | `-a`, `--all` | Include hidden system notes (IDs starting with `.`) |
 | `-S`, `--scope GLOB` | Constrain results to IDs matching glob pattern |
 
@@ -89,11 +90,14 @@ The search runs globally (traversing all notes for semantic matching), but only 
 Deep search (`--deep`) follows tags and edges from the primary results to discover related notes that wouldn't appear in a normal search. Results are grouped under the primary note that led to them.
 
 ```bash
-keep find "authentication" --deep      # Primary results + related notes
-keep find "auth" --deep -l 5           # Top 5 with deep groups
+keep find "authentication" --deep            # Primary results + related notes
+keep find "auth" --deep -l 5                  # Top 5 with deep groups
+keep find "auth" --deep --deep-depth 25       # Widen the follow (default 10, max 100)
 ```
 
 When edge tags are defined (see [EDGE-TAGS.md](EDGE-TAGS.md)), deep search follows edges to find related notes via graph traversal. Without edges, it falls back to tag-based discovery — finding notes that share tags with the primary results.
+
+`--deep-depth` controls how many of the top primary results contribute their tags/edges to the follow step: a larger value surfaces more bridge notes at the cost of a wider search, a smaller value keeps results tight. It defaults to 10 and is capped at 100.
 
 ## See Also
 
