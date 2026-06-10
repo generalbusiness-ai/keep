@@ -57,6 +57,7 @@ User-facing terminology:
 * If recent work was implementing a written design doc (`later/design/`), ensure that doc reflects the current status.
 * Review all `docs/` for completeness and accuracy.
 * Run `ruff check` (on all files) and fix all issues.
+* Run `cve-lite --verbose` and fix all issues within range.
 * Check CI for existing alerts.  If found: address them, and re-check by running the CI audit locally.
 * Review all previously-ignored CVEs and other suppressed alerts.
 
