@@ -120,7 +120,6 @@ def resolve_remote_config(config: Optional[StoreConfig]) -> Optional["RemoteConf
     if not api_key:
         return None
     return RemoteConfig(api_url=api_url, api_key=api_key, project=project or None)
-    return url
 
 
 class RemoteKeeper:
