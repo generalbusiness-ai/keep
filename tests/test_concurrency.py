@@ -170,6 +170,92 @@ class TestConcurrentWrites:
         thread.join(timeout=1.0)
         assert errors == []
 
+    def test_all_read_helpers_bypass_write_lock(self, tmp_path):
+        """_execute(SELECT), _fetchone, and _fetchall all skip self._lock.
+
+        Regression guard for the lock-free read path (F015 / commit 8876189).
+        Seeds N documents, holds the write lock in the main thread, then fans
+        out reader threads that exercise get() → _fetchone, list_ids() →
+        _execute(SELECT), and count() → _fetchone.  Every reader must complete
+        within a short timeout while the lock is still held.  If any helper
+        were re-placed under self._lock the reader would block indefinitely and
+        finished.wait(timeout=...) would return False, failing the assertion.
+
+        All coordination uses threading.Event so the test is deterministic and
+        free of sleep-based timing gates.
+        """
+        from keep.document_store import DocumentStore
+
+        NUM_DOCS = 10
+        store = DocumentStore(tmp_path / "test.db")
+        for i in range(NUM_DOCS):
+            store.upsert("default", f"doc{i}", f"summary {i}", {"idx": str(i)})
+
+        # Confirm the seed is visible before entering the lock.
+        assert store.count("default") == NUM_DOCS
+
+        # Each reader signals its slot when done; collect all signals.
+        NUM_READERS = 4
+        finished = [threading.Event() for _ in range(NUM_READERS)]
+        errors: list[Exception] = []
+
+        def reader_get(slot: int) -> None:
+            """Exercise get() — calls _fetchone with a SELECT."""
+            try:
+                rec = store.get("default", "doc0")
+                assert rec is not None, "get() returned None for seeded doc"
+                assert rec.summary == "summary 0"
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished[slot].set()
+
+        def reader_list(slot: int) -> None:
+            """Exercise list_ids() — calls _execute with a SELECT."""
+            try:
+                ids = store.list_ids("default")
+                assert len(ids) == NUM_DOCS, (
+                    f"list_ids returned {len(ids)}, expected {NUM_DOCS}"
+                )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished[slot].set()
+
+        def reader_count(slot: int) -> None:
+            """Exercise count() — calls _fetchone with a SELECT."""
+            try:
+                n = store.count("default")
+                assert n == NUM_DOCS, f"count returned {n}, expected {NUM_DOCS}"
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished[slot].set()
+
+        # Acquire the write lock and hold it for the entire fan-out.
+        with store._lock:
+            # Start readers while the lock is held — they must not block on it.
+            threads = [
+                threading.Thread(target=reader_get,   args=(0,)),
+                threading.Thread(target=reader_list,  args=(1,)),
+                threading.Thread(target=reader_count, args=(2,)),
+                threading.Thread(target=reader_get,   args=(3,)),
+            ]
+            for t in threads:
+                t.start()
+
+            # All four readers must complete before the timeout expires while
+            # self._lock is still held by this (main) thread.
+            for slot, ev in enumerate(finished):
+                assert ev.wait(timeout=2.0), (
+                    f"Reader {slot} blocked — read helper may be under self._lock"
+                )
+        # Lock released; join to ensure no lingering threads.
+        for t in threads:
+            t.join(timeout=2.0)
+
+        assert errors == [], f"Reader errors: {errors}"
+
     def test_parallel_upserts_no_data_loss(self, tmp_path):
         """8 workers each write unique docs — all must be present after."""
         db_path = str(tmp_path / "test.db")
