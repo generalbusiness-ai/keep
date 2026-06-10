@@ -676,6 +676,7 @@ class _EnvActionContext:
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: str | None = None,
     ) -> list[Any]:
         return self._env.find(
@@ -689,6 +690,7 @@ class _EnvActionContext:
             include_self=include_self,
             include_hidden=include_hidden,
             deep=deep,
+            deep_follow_depth=deep_follow_depth,
             scope=scope,
         )
 
@@ -735,8 +737,18 @@ class _EnvActionContext:
     def resolve_meta(self, id: str, limit_per_doc: int = 3) -> dict[str, list[Any]]:
         return self._env.resolve_meta(id, limit_per_doc=limit_per_doc)
 
-    def traverse(self, source_ids: list[str], *, limit: int = 5) -> dict[str, list[Any]]:
-        return self._env.traverse_related(source_ids, limit_per_source=limit)
+    def traverse(
+        self,
+        source_ids: list[str],
+        *,
+        limit: int = 5,
+        deep_follow_depth: int = 10,
+    ) -> dict[str, list[Any]]:
+        return self._env.traverse_related(
+            source_ids,
+            limit_per_source=limit,
+            deep_follow_depth=deep_follow_depth,
+        )
 
     def get_db_connection(self) -> Any:
         return self._env.get_db_connection()

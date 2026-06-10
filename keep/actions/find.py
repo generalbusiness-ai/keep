@@ -35,6 +35,17 @@ class Find:
         include_hidden = bool(params.get("include_hidden", False))
         include_self = bool(params.get("include_self", False))
         deep = bool(params.get("deep", False))
+        # deep_follow_depth: how many primary items contribute tags/edges to the
+        # deep-follow step.  Clamp: negative/zero → 1; > 100 → 100 (also
+        # enforced downstream in _find_direct and traverse_related).
+        _raw_depth = params.get("deep_follow_depth")
+        if _raw_depth is not None:
+            try:
+                deep_follow_depth = max(1, min(int(_raw_depth), 100))
+            except (TypeError, ValueError):
+                deep_follow_depth = 10
+        else:
+            deep_follow_depth = 10
         order_by = str(params.get("order_by") or "updated")
         limit = int(params.get("limit", 10))
         if limit <= 0:
@@ -98,6 +109,7 @@ class Find:
                 include_self=include_self,
                 include_hidden=include_hidden,
                 deep=deep,
+                deep_follow_depth=deep_follow_depth,
                 scope=scope,
             )
         else:

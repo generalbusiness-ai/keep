@@ -3938,6 +3938,7 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: Optional[str] = None,
     ) -> list[Item]:
         """Find items by hybrid search (semantic + FTS5) or similarity to an existing note.
@@ -3961,6 +3962,9 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
             include_self: Include the queried item in results (only with similar_to)
             include_hidden: Include system notes (dot-prefix IDs)
             deep: Follow tags from results to discover related items
+            deep_follow_depth: When ``deep`` is True, how many of the top
+                primary results contribute tags/edges to the follow step.
+                Defaults to 10; clamped to [1, 100].
             scope: ID glob pattern to constrain results (e.g. ``file:///path/to/dir*``).
                    Search may traverse items outside the scope, but only items whose
                    base ID matches the glob are returned.
@@ -3969,6 +3973,10 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
             raise ValueError("Specify either query or similar_to, not both")
         if not query and not similar_to:
             raise ValueError("Specify either query or similar_to")
+
+        # Clamp deep_follow_depth to prevent runaway fan-out.
+        _MAX_DEEP_FOLLOW_DEPTH = 100
+        deep_follow_depth = max(1, min(int(deep_follow_depth), _MAX_DEEP_FOLLOW_DEPTH))
 
         chroma_coll = self._resolve_chroma_collection()
         doc_coll = self._resolve_doc_collection()
@@ -4282,6 +4290,7 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                         query=deep_query,
                         embedding=embedding,
                         exclude_ids=exclude,
+                        top_k=deep_follow_depth,
                     )
                     # Inject entities that produced deep groups into the
                     # primary list so they appear as result items and
@@ -4309,6 +4318,7 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                     deep_groups = self._deep_follow_via_flow(
                         query=flow_query,
                         limit=limit,
+                        deep_follow_depth=deep_follow_depth,
                         embedding=embedding,
                     )
 
@@ -4595,16 +4605,19 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: Optional[str] = None,
     ) -> list[Item]:
         """Find items via the flow host interface."""
         logger.debug(
-            "Keeper.find query=%s tags=%d similar_to=%s limit=%s deep=%s scope=%s",
+            "Keeper.find query=%s tags=%d similar_to=%s limit=%s deep=%s "
+            "deep_follow_depth=%s scope=%s",
             bool(query),
             len(tags or {}),
             similar_to or "",
             limit,
             deep,
+            deep_follow_depth,
             scope or "",
         )
         return flow_find_items(
@@ -4618,6 +4631,7 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
             include_self=include_self,
             include_hidden=include_hidden,
             deep=deep,
+            deep_follow_depth=deep_follow_depth,
             scope=scope,
         )
 

@@ -1512,6 +1512,10 @@ def find(
     since: Annotated[Optional[str], typer.Option("--since", help="Updated since")] = None,
     until: Annotated[Optional[str], typer.Option("--until", help="Updated before")] = None,
     deep: Annotated[bool, typer.Option("--deep", "-D", help="Follow tags for related items")] = False,
+    deep_depth: Annotated[Optional[int], typer.Option(
+        "--deep-depth",
+        help="How many primary results contribute tags/edges to --deep follow (default 10, max 100)",
+    )] = None,
     show_all: Annotated[bool, typer.Option(
         "--all", "-a", help="Include hidden system notes (IDs starting with '.')"
     )] = False,
@@ -1528,6 +1532,7 @@ def find(
         keep find --id %abc123              # Find similar to item
         keep find "auth" -t project=myapp   # Search + filter by tag
         keep find "auth" --deep             # Follow tags for related items
+        keep find "auth" --deep --deep-depth 25  # Wider deep follow
         keep find "auth" --since P7D        # Last 7 days only
         keep find "auth" -S "file://.*"     # Scope to file items
     """
@@ -1547,6 +1552,7 @@ def find(
         "tags": tag_filter or None,
         "limit": limit,
         "deep": deep or None,
+        "deep_follow_depth": deep_depth if deep_depth is not None else None,
         "since": since,
         "until": until,
         "scope": scope,

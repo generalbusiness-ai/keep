@@ -104,6 +104,7 @@ class ActionContext(Protocol):
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: str | None = None,
     ) -> list[Any]: ...
 

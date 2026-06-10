@@ -21,9 +21,11 @@ rules:
   - when: "!has(search.count) || search.count == 0"
     return: done
   - id: related
-    # Follow edges from search hits
+    # Follow edges from search hits; deep_follow_depth controls how many
+    # primary items contribute tags to the Tier-2 tag-follow fallback.
     do: traverse
     with:
       items: "{search.results}"
       limit: "{params.deep_limit}"
+      deep_follow_depth: "{params.deep_follow_depth}"
   - return: done

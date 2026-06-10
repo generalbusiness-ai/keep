@@ -21,6 +21,9 @@ class Traverse:
         if not isinstance(raw_items, list) or not raw_items:
             raise ValueError("traverse requires non-empty items list")
         limit = max(int(params.get("limit", 5)), 1)
+        # deep_follow_depth controls how many primary items contribute tags to
+        # the Tier-2 tag-follow fallback.  Defaults to 10; clamped in the env.
+        deep_follow_depth = int(params.get("deep_follow_depth", 10))
 
         source_ids: list[str] = []
         for raw in raw_items:
@@ -35,7 +38,11 @@ class Traverse:
         total = 0
 
         traverse = getattr(context, "traverse", None)
-        related_groups = traverse(source_ids, limit=limit) if callable(traverse) else {}
+        related_groups = (
+            traverse(source_ids, limit=limit, deep_follow_depth=deep_follow_depth)
+            if callable(traverse)
+            else {}
+        )
         if not isinstance(related_groups, dict):
             related_groups = {}
 

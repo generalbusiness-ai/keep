@@ -138,12 +138,14 @@ class _KeeperActionContext:
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: str | None = None,
     ) -> list[Any]:
         return self._keeper.find(
             query, tags=tags, similar_to=similar_to, limit=limit,
             stored_only=stored_only, since=since, until=until, include_self=include_self,
-            include_hidden=include_hidden, deep=deep, scope=scope,
+            include_hidden=include_hidden, deep=deep, deep_follow_depth=deep_follow_depth,
+            scope=scope,
         )
 
     def list_items(

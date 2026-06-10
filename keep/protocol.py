@@ -106,6 +106,7 @@ class KeeperProtocol(FlowHostProtocol, Protocol):
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
     ) -> list[Item]: ...
 
     def get_similar_for_display(

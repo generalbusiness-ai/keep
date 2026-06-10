@@ -407,6 +407,7 @@ class RemoteKeeper:
         include_self: bool = False,
         include_hidden: bool = False,
         deep: bool = False,
+        deep_follow_depth: int = 10,
         scope: Optional[str] = None,
     ) -> list[Item]:
         return flow_find_items(
@@ -420,6 +421,7 @@ class RemoteKeeper:
             include_self=include_self,
             include_hidden=include_hidden,
             deep=deep,
+            deep_follow_depth=deep_follow_depth,
             scope=scope,
         )
 
