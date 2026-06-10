@@ -435,7 +435,14 @@ def test_poll_markdown_mirrors_incremental_rewrites_only_changed_note(
             allow_existing=True,
         )
         clear_sync_outbox(kp)
-        add_markdown_mirror(kp, root, interval="PT1S")
+        # Long interval (debounce window) on purpose — shared by the poll tests
+        # below. They assert the FIRST poll does NOT export (the change is still
+        # within the window), then force a re-export by backdating pending_since.
+        # A short interval like PT1S races with put→poll latency: on a loaded CI
+        # runner >1s elapses, the window expires, and the first poll exports
+        # unexpectedly (a real flake observed on Python 3.13 CI). PT1H can never
+        # expire mid-test; the backdated pending_since still makes is_due() true.
+        add_markdown_mirror(kp, root, interval="PT1H")
 
         alpha_path = root / "alpha.md"
         beta_path = root / "beta.md"
@@ -516,7 +523,7 @@ def test_poll_markdown_mirrors_remote_source_reexports_on_interval(
             include_system=False,
             allow_existing=True,
         )
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
         record_markdown_mirror_export_success(kp, root)
 
         alpha_path = root / "alpha.md"
@@ -625,7 +632,7 @@ def test_poll_markdown_mirrors_remote_change_feed_only_reexports_after_changes(
             include_system=False,
             allow_existing=True,
         )
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
         record_markdown_mirror_export_success(kp, root, source_cursor="1")
 
         alpha_path = root / "alpha.md"
@@ -769,7 +776,7 @@ def test_poll_markdown_mirrors_remote_change_feed_rewrites_inverse_target_on_sou
         root = tmp_path / "vault"
         root.mkdir()
         run_markdown_export_once(host, root, include_system=False, allow_existing=True)
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
         record_markdown_mirror_export_success(kp, root, source_cursor="0")
 
         source_path = root / "session-1.md"
@@ -927,7 +934,7 @@ def test_poll_markdown_mirrors_remote_change_feed_rewrites_old_and_new_edge_targ
         root = tmp_path / "vault"
         root.mkdir()
         run_markdown_export_once(host, root, include_system=False, allow_existing=True)
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
         record_markdown_mirror_export_success(kp, root, source_cursor="0")
 
         source_path = root / "session-2.md"
@@ -990,7 +997,7 @@ def test_poll_markdown_mirrors_incremental_rewrites_inverse_target_on_source_dis
             allow_existing=True,
         )
         clear_sync_outbox(kp)
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
 
         source_path = root / "session-1.md"
         target_path = root / "Joanna.md"
@@ -1036,7 +1043,7 @@ def test_poll_markdown_mirrors_incremental_rewrites_old_and_new_edge_targets(
             allow_existing=True,
         )
         clear_sync_outbox(kp)
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
 
         source_path = root / "session-2.md"
         joanna_path = root / "Joanna.md"
@@ -1092,7 +1099,7 @@ def test_poll_markdown_mirrors_falls_back_to_full_replan_when_map_is_missing_not
             allow_existing=True,
         )
         clear_sync_outbox(kp)
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
 
         map_path = root / ".keep-sync" / "map.tsv"
         map_path.write_text("export_ref\tkeep_id\n", encoding="utf-8")
@@ -1136,7 +1143,7 @@ def test_poll_markdown_mirrors_limits_outbox_drain_per_tick(
             allow_existing=True,
         )
         clear_sync_outbox(kp)
-        add_markdown_mirror(kp, root, interval="PT1S")
+        add_markdown_mirror(kp, root, interval="PT1H")
 
         for idx in range(5):
             kp.put(f"Body {idx}", id=f"doc-{idx}")
