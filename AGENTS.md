@@ -50,7 +50,7 @@ User-facing terminology:
 - Feature work should be on its own worktree/branch.
 - Do not commit to main, tag, push, or release without explicit user instruction.
 - Major version is zero.  Minor version is updated with feature releases.  Patch version for maintenance.
-- Use `scripts/release.sh` to release, gated by the checklist below.
+- Use `scripts/release.sh` to release, gated by the checklist below.  The GitHub release notes must be a succinct summary of changes, written to help a user understand the impact.
 
 **Before any release**
 
