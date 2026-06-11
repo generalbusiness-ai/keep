@@ -1751,3 +1751,33 @@ class TestCommandAliases:
 class TestStdinJsonTemplates:
     """Tests for stdin JSON template expansion."""
     pass  # Template tests removed — functions moved out of cli.py
+
+
+# -----------------------------------------------------------------------------
+# Logging hygiene
+# -----------------------------------------------------------------------------
+
+class TestCliLoggingHygiene:
+    """Importing the CLI must not configure console logging.
+
+    keep.mcp constructs the FastMCP server at import time, and FastMCP's
+    __init__ calls logging.basicConfig() with a Rich console handler on the
+    root logger. keep.cli_app imports keep.mcp, so without the import-time
+    snapshot/restore in keep.mcp every CLI command would echo keep's INFO
+    records — e.g. the remote-call audit lines bound for keep-client.log —
+    to the terminal.
+    """
+
+    @pytest.mark.parametrize("module", ["keep.mcp", "keep.cli_app"])
+    def test_import_leaves_root_logger_unconfigured(self, module):
+        """A fresh interpreter importing the module gains no root handlers."""
+        code = (
+            f"import logging, {module}\n"
+            "handlers = logging.getLogger().handlers\n"
+            "assert handlers == [], f'root logger gained handlers: {handlers}'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stderr

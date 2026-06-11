@@ -24,6 +24,7 @@ from urllib.parse import quote, unquote
 
 from .const import STATE_PROMPT
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.logging import configure_logging
 from mcp.shared.exceptions import McpError
 from mcp.types import (
     CallToolResult,
@@ -377,6 +378,18 @@ class KeepFastMCP(FastMCP):
 # Server setup
 # ---------------------------------------------------------------------------
 
+# FastMCP.__init__ calls logging.basicConfig() with a Rich console handler on
+# the ROOT logger. The server must be constructed at import time (the tool
+# decorators below register against it), but importers of this module — the
+# CLI imports it for the `keep mcp` command — must not inherit that handler:
+# it would echo keep's INFO records, such as the remote-call audit lines bound
+# for keep-client.log, to every CLI user's terminal. Snapshot and restore root
+# logger state around construction; main() re-applies the server logging
+# config for the process that actually serves MCP.
+_root_logger = logging.getLogger()
+_saved_handlers = list(_root_logger.handlers)
+_saved_level = _root_logger.level
+
 mcp = KeepFastMCP(
     "keep",
     instructions=(
@@ -385,6 +398,10 @@ mcp = KeepFastMCP(
         "Search by meaning. Persist context across sessions."
     ),
 )
+
+_root_logger.handlers[:] = _saved_handlers
+_root_logger.setLevel(_saved_level)
+del _root_logger, _saved_handlers, _saved_level
 
 
 def _read_note_resource(note_id: str) -> dict[str, Any]:
@@ -775,6 +792,10 @@ def main():
     # Use os._exit to avoid SystemExit during interpreter shutdown, which
     # can deadlock on the stdin buffer lock held by the reader thread.
     signal.signal(signal.SIGINT, lambda *_: os._exit(130))
+
+    # Re-apply the FastMCP logging setup that the import-time snapshot/restore
+    # above undid — the server process does want its stderr console handler.
+    configure_logging(mcp.settings.log_level)
 
     # Eagerly warm up the backend so setup issues surface immediately:
     # daemon mode resolves the port; remote mode is a no-op (the first tool
