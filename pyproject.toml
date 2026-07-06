@@ -37,7 +37,9 @@ dependencies = [
     # Document extraction
     # Security floor for PYSEC-2026-175/177/178/179 in PyJWT.
     "pyjwt>=2.13.0",
-    "pypdf>=6.10.0",  # GHSA-3crg-w4f6-42mx and CVE-2026-33699 fixes
+    # Security floor: CVE-2026-48155/48156/48735/49460/49461/54530/54531 and
+    # GHSA-jm82-fx9c-mx94 (crafted-PDF resource-exhaustion DoS), fixed by 6.13.3.
+    "pypdf>=6.13.3",
     "pypdfium2>=4.0",
     "beautifulsoup4>=4.9",
     "lxml>=6.1.0",  # CVE-2026-41066 fix for XML entity resolution defaults
@@ -58,9 +60,19 @@ dependencies = [
     "pydantic>=2.0,<3.0",
     # Security floor for transitive consumers via uvicorn[standard] / pydantic-settings.
     "python-dotenv>=1.2.2",
-    # Security floor: PYSEC-2026-161 (Starlette Host-header URL reconstruction)
-    # fixed in 1.0.1. Pulled in transitively by mcp[starlette]/uvicorn.
-    "starlette>=1.0.1",
+    # Security floor: PYSEC-2026-248/249 (request.url authority confusion;
+    # urlencoded form limits ignored) fixed in 1.3.1, plus CVE-2026-48817/48818.
+    # Pulled in transitively by mcp[starlette]/uvicorn.
+    "starlette>=1.3.1",
+    # Security floor: CVE-2026-53538/53539/53540 (urlencoded parser differential
+    # and DoS) fixed in 0.0.31. Pulled in transitively via mcp/starlette forms.
+    "python-multipart>=0.0.31",
+    # Security floor: GHSA-4xgf-cpjx-pc3j (secrets_dir symlink traversal)
+    # fixed in 2.14.2. Pulled in transitively via mcp.
+    "pydantic-settings>=2.14.2",
+    # Security floor: GHSA-537c-gmf6-5ccf (statically linked OpenSSL advisory
+    # 2026-06-09) fixed in 48.0.1. Pulled in transitively via pyjwt/auth stacks.
+    "cryptography>=48.0.1",
     # Security floor: CVE-2026-4539 (Pygments GUID-regex ReDoS) fixed in 2.20.0.
     # Pulled in transitively via rich (typer, pip-audit, chromadb).
     "pygments>=2.20.0",
