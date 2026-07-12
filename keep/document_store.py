@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 16
 DEFAULT_SQLITE_SLOW_MS = 1000.0
 DEFAULT_SQLITE_PROGRESS_MS = 5000.0
+# Chunk size for IN (?,...) queries over caller-supplied ID lists. SQLite's
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds (32,766 since 3.32);
+# 900 stays safely under both, leaving room for the non-ID parameters.
+SQL_VAR_CHUNK = 900
 
 
 def _env_float(name: str, default: float) -> float:
@@ -2037,12 +2041,16 @@ class DocumentStore:
         if not ids:
             return
         now = self._now()
+        # Deduplicate and chunk so IN(...) stays under SQLite's variable limit.
+        unique_ids = list(dict.fromkeys(ids))
         with self._lock:
-            placeholders = ",".join("?" * len(ids))
-            self._execute(f"""
-                UPDATE documents SET accessed_at = ?
-                WHERE collection = ? AND id IN ({placeholders})
-            """, (now, collection, *ids))
+            for start in range(0, len(unique_ids), SQL_VAR_CHUNK):
+                chunk = unique_ids[start:start + SQL_VAR_CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                self._execute(f"""
+                    UPDATE documents SET accessed_at = ?
+                    WHERE collection = ? AND id IN ({placeholders})
+                """, (now, collection, *chunk))
             self._conn.commit()
 
     def restore_latest_version(self, collection: str, id: str) -> Optional[DocumentRecord]:
@@ -2857,25 +2865,30 @@ class DocumentStore:
         if not ids:
             return {}
 
-        placeholders = ",".join("?" * len(ids))
-        cursor = self._execute(f"""
-            SELECT id, collection, summary, tags_json, created_at, updated_at, content_hash, accessed_at
-            FROM documents
-            WHERE collection = ? AND id IN ({placeholders})
-        """, (collection, *ids))
-
+        # Deduplicate (callers may concatenate overlapping ID lists) and
+        # chunk so IN(...) stays under SQLite's variable limit.
+        unique_ids = list(dict.fromkeys(ids))
         results = {}
-        for row in cursor:
-            results[row["id"]] = DocumentRecord(
-                id=row["id"],
-                collection=row["collection"],
-                summary=row["summary"],
-                tags=_load_tags_json(row["tags_json"]),
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                content_hash=row["content_hash"],
-                accessed_at=row["accessed_at"],
-            )
+        for start in range(0, len(unique_ids), SQL_VAR_CHUNK):
+            chunk = unique_ids[start:start + SQL_VAR_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            cursor = self._execute(f"""
+                SELECT id, collection, summary, tags_json, created_at, updated_at, content_hash, accessed_at
+                FROM documents
+                WHERE collection = ? AND id IN ({placeholders})
+            """, (collection, *chunk))
+
+            for row in cursor:
+                results[row["id"]] = DocumentRecord(
+                    id=row["id"],
+                    collection=row["collection"],
+                    summary=row["summary"],
+                    tags=_load_tags_json(row["tags_json"]),
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                    content_hash=row["content_hash"],
+                    accessed_at=row["accessed_at"],
+                )
 
         return results
 

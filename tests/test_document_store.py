@@ -1128,3 +1128,51 @@ class TestDistinctTagQueries:
         results = store.query_by_id_prefix("default", "has%")
         assert len(results) == 1
         assert results[0].id == "has%wild"
+
+
+class TestGetManyChunking:
+    """Chunking of IN(...) queries over caller-supplied ID lists.
+
+    These must stay under SQLite's variable limit (999 on older builds),
+    via dedup + chunking.
+    """
+
+    @pytest.fixture
+    def store(self):
+        """Create a temporary document store."""
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "documents.db"
+            with DocumentStore(db_path) as store:
+                yield store
+
+    def test_get_many_handles_ids_beyond_sqlite_variable_limit(
+        self, store: DocumentStore,
+    ) -> None:
+        """Regression: >32k ids raised 'too many SQL variables'."""
+        for i in range(3):
+            store.upsert(collection="default", id=f"doc:{i}",
+                         summary=f"summary {i}", tags={})
+
+        # Well past both the legacy (999) and modern (32,766) limits,
+        # with duplicates mixed in (find callers concatenate ID lists).
+        ids = [f"missing:{i}" for i in range(40_000)]
+        ids += [f"doc:{i}" for i in range(3)] * 2
+
+        results = store.get_many("default", ids)
+        assert set(results) == {"doc:0", "doc:1", "doc:2"}
+        assert results["doc:1"].summary == "summary 1"
+
+    def test_touch_many_handles_ids_beyond_sqlite_variable_limit(
+        self, store: DocumentStore,
+    ) -> None:
+        """touch_many shares the same IN(...) shape and limit."""
+        store.upsert(collection="default", id="doc:t",
+                     summary="touch me", tags={})
+        before = store.get("default", "doc:t").accessed_at
+
+        ids = [f"missing:{i}" for i in range(40_000)] + ["doc:t", "doc:t"]
+        store.touch_many("default", ids)
+
+        after = store.get("default", "doc:t").accessed_at
+        assert after is not None
+        assert before is None or after >= before

@@ -269,3 +269,43 @@ class TestFindSinceFilter:
         ids = {r.id for r in results}
         assert "test:fresh" in ids
         assert "test:versioned" in ids
+
+
+class TestFindEnrichmentBatching:
+    """Result enrichment must hydrate canonical tags with a batched read."""
+
+    def test_find_enrichment_uses_get_many_not_per_item_get(self, kp, monkeypatch):
+        """Regression: enrichment issued one SQLite get() per result."""
+        ds = kp._document_store
+        calls = {"get": 0, "get_many": 0}
+        orig_get, orig_get_many = ds.get, ds.get_many
+        # MockDocumentStore.get_many fans out to get() internally; count
+        # only get() calls made directly (outside get_many).
+        depth = {"get_many": 0}
+
+        def counting_get(collection, id):
+            if depth["get_many"] == 0:
+                calls["get"] += 1
+            return orig_get(collection, id)
+
+        def counting_get_many(collection, ids):
+            calls["get_many"] += 1
+            depth["get_many"] += 1
+            try:
+                return orig_get_many(collection, ids)
+            finally:
+                depth["get_many"] -= 1
+
+        monkeypatch.setattr(ds, "get", counting_get)
+        monkeypatch.setattr(ds, "get_many", counting_get_many)
+
+        results = kp.find("likes", limit=4)
+
+        assert len(results) >= 2
+        # Enrichment still hydrates the canonical tags from the doc store
+        assert all("user" in item.tags for item in results)
+        # ... via a batched read, not one lookup per result item
+        assert calls["get_many"] >= 1
+        assert calls["get"] == 0, (
+            f"find() issued {calls['get']} per-item doc-store reads"
+        )
