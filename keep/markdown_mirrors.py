@@ -15,6 +15,7 @@ import yaml
 
 from .dependencies import NoteDependencyService
 from .markdown_export import (
+    _resolve_export_destination,
     bundle_export_refs,
     get_edge_data,
     get_export_doc,
@@ -491,8 +492,19 @@ def _bundle_map_entries(
 
 
 def _delete_rel_path(root: Path, rel_path: Path) -> None:
+    # rel_path can come from the on-disk .keep-sync map, which is not
+    # trusted: refuse to delete anything outside the mirror root (the full
+    # export path enforces the same containment on writes). Validate with
+    # the resolved path, but unlink the original lexical path — unlinking
+    # the resolved path would follow an in-root symlink and delete its
+    # target instead of the stale link itself.
+    try:
+        _resolve_export_destination(root, rel_path)
+    except ValueError:
+        logger.warning("Skipping mirror delete outside root: %s", rel_path)
+        return
     target = root / rel_path
-    if target.exists():
+    if target.is_symlink() or target.exists():
         target.unlink()
         _prune_empty_dirs(root, target.parent)
 
@@ -752,7 +764,13 @@ def run_markdown_export_incremental(
             is_edge_tag=is_edge_tag,
         )
         for file_rel, text in files.items():
-            dest = out_dir / file_rel
+            # Same containment guard as the full-export writer: refs derived
+            # from note ids / the on-disk map must not escape the mirror root.
+            try:
+                dest = _resolve_export_destination(out_dir, Path(file_rel))
+            except ValueError:
+                logger.warning("Skipping mirror write outside root: %s", file_rel)
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(text, encoding="utf-8")
 
@@ -812,18 +830,21 @@ def run_markdown_export_once(
         )
 
         for rel_path in sorted(new_paths):
-            dest = out_dir / rel_path
+            try:
+                dest = _resolve_export_destination(out_dir, rel_path)
+            except ValueError:
+                logger.warning("Skipping mirror write outside root: %s", rel_path)
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(tmpdir / rel_path, dest)
 
     if allow_existing:
+        # prev_map is loaded from the on-disk .keep-sync map (untrusted);
+        # _delete_rel_path enforces containment within out_dir.
         old_paths = {Path(f"{export_ref}.md") for export_ref in prev_map}
         stale_paths = sorted(old_paths - new_paths, reverse=True)
         for rel_path in stale_paths:
-            target = out_dir / rel_path
-            if target.exists():
-                target.unlink()
-                _prune_empty_dirs(out_dir, target.parent)
+            _delete_rel_path(out_dir, rel_path)
 
     _write_map(out_dir, new_map)
     _write_state(out_dir, entry=mirror_entry, count=count, info=info)

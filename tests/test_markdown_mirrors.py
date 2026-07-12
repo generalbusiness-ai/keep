@@ -1177,3 +1177,71 @@ def test_next_markdown_mirror_delay_prefers_pending_due_time():
     )
     delay = next_markdown_mirror_delay([idle, ready])
     assert delay == 0.0
+
+
+def test_delete_rel_path_refuses_escape(tmp_path):
+    """_delete_rel_path must not unlink targets outside the mirror root."""
+    from keep.markdown_mirrors import _delete_rel_path
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("keep me", encoding="utf-8")
+
+    _delete_rel_path(root, Path("../outside.md"))
+    assert outside.exists()
+
+    # In-tree deletes still work, including empty-dir pruning up to the root
+    inside = root / "sub" / "note.md"
+    inside.parent.mkdir()
+    inside.write_text("x", encoding="utf-8")
+    _delete_rel_path(root, Path("sub/note.md"))
+    assert not inside.exists()
+    assert not (root / "sub").exists()
+    assert root.exists()
+
+
+def test_poisoned_map_entry_cannot_delete_outside_root(mock_providers, tmp_path):
+    """A tampered .keep-sync map ref must not delete files outside the mirror."""
+    kp = Keeper(store_path=tmp_path / "store")
+    try:
+        kp.put("Alpha body", id="alpha")
+        root = tmp_path / "vault"
+        root.mkdir()
+        run_markdown_export_once(kp, root, include_system=False, allow_existing=True)
+
+        victim = tmp_path / "victim.md"
+        victim.write_text("do not delete", encoding="utf-8")
+        map_path = root / ".keep-sync" / "map.tsv"
+        map_path.write_text(
+            map_path.read_text(encoding="utf-8") + "../victim\tsome-id\n",
+            encoding="utf-8",
+        )
+
+        # The poisoned ref is stale (not re-exported) → hits the delete path
+        run_markdown_export_once(kp, root, include_system=False, allow_existing=True)
+        assert victim.exists()
+        assert (root / "alpha.md").is_file()
+    finally:
+        kp.close()
+
+
+def test_delete_rel_path_unlinks_symlink_not_target(tmp_path):
+    """Regression test for symlink-following deletes.
+
+    Deleting a stale in-root symlink must remove the link itself, not
+    follow it and delete the linked note.
+    """
+    from keep.markdown_mirrors import _delete_rel_path
+
+    root = tmp_path / "root"
+    root.mkdir()
+    valuable = root / "valuable.md"
+    valuable.write_text("keep me", encoding="utf-8")
+    stale = root / "stale.md"
+    stale.symlink_to(valuable)
+
+    _delete_rel_path(root, Path("stale.md"))
+
+    assert valuable.exists()
+    assert not stale.exists() and not stale.is_symlink()
