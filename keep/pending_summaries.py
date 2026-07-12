@@ -549,36 +549,46 @@ class PendingSummaryQueue:
 
     def count_delegated(self) -> int:
         """Count items currently delegated to a remote service."""
-        cursor = self._conn.execute(
-            "SELECT COUNT(*) FROM pending_summaries WHERE status = 'delegated'"
-        )
-        return cursor.fetchone()[0]
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT COUNT(*) FROM pending_summaries WHERE status = 'delegated'"
+            )
+            return cursor.fetchone()[0]
 
     def count(self) -> int:
         """Get count of pending items (excludes processing and failed)."""
-        cursor = self._conn.execute(
-            "SELECT COUNT(*) FROM pending_summaries WHERE status = 'pending'"
-        )
-        return cursor.fetchone()[0]
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT COUNT(*) FROM pending_summaries WHERE status = 'pending'"
+            )
+            return cursor.fetchone()[0]
 
     def stats(self) -> dict:
-        """Get queue statistics including status breakdown."""
-        cursor = self._conn.execute("""
-            SELECT status, COUNT(*) as cnt
-            FROM pending_summaries
-            GROUP BY status
-        """)
-        by_status = {row[0] or "pending": row[1] for row in cursor.fetchall()}
+        """Get queue statistics including status breakdown.
 
-        cursor = self._conn.execute("""
-            SELECT
-                COUNT(*) as total,
-                COUNT(DISTINCT collection) as collections,
-                MAX(attempts) as max_attempts,
-                MIN(queued_at) as oldest
-            FROM pending_summaries
-        """)
-        row = cursor.fetchone()
+        All reads of the shared connection must hold ``self._lock`` — the
+        daemon's HTTP threads call these while the processor thread is inside
+        ``dequeue()``'s BEGIN IMMEDIATE transaction on the same connection.
+        ``stats_by_type`` takes the lock itself, so call it before entering.
+        """
+        by_type = self.stats_by_type()
+        with self._lock:
+            cursor = self._conn.execute("""
+                SELECT status, COUNT(*) as cnt
+                FROM pending_summaries
+                GROUP BY status
+            """)
+            by_status = {row[0] or "pending": row[1] for row in cursor.fetchall()}
+
+            cursor = self._conn.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(DISTINCT collection) as collections,
+                    MAX(attempts) as max_attempts,
+                    MIN(queued_at) as oldest
+                FROM pending_summaries
+            """)
+            row = cursor.fetchone()
         return {
             "pending": by_status.get("pending", 0),
             "processing": by_status.get("processing", 0),
@@ -589,34 +599,36 @@ class PendingSummaryQueue:
             "max_attempts": row[2] or 0,
             "oldest": row[3],
             "queue_path": str(self._queue_path),
-            "by_type": self.stats_by_type(),
+            "by_type": by_type,
         }
 
     def stats_by_type(self) -> dict[str, int]:
         """Get count of active items grouped by task type."""
-        cursor = self._conn.execute("""
-            SELECT task_type, COUNT(*) as cnt
-            FROM pending_summaries
-            WHERE status IN ('pending', 'processing', 'delegated')
-            GROUP BY task_type
-            ORDER BY cnt DESC
-        """)
-        return {row[0]: row[1] for row in cursor.fetchall()}
+        with self._lock:
+            cursor = self._conn.execute("""
+                SELECT task_type, COUNT(*) as cnt
+                FROM pending_summaries
+                WHERE status IN ('pending', 'processing', 'delegated')
+                GROUP BY task_type
+                ORDER BY cnt DESC
+            """)
+            return {row[0]: row[1] for row in cursor.fetchall()}
 
     def list_pending(self, limit: int = 50) -> list[dict]:
         """List pending work items."""
-        cursor = self._conn.execute("""
-            SELECT id, task_type, queued_at
-            FROM pending_summaries
-            WHERE status IN ('pending', 'processing')
-            ORDER BY queued_at ASC
-            LIMIT ?
-        """, (limit,))
-        return [
-            {"work_id": row[0], "task_type": row[1], "supersede_key": row[0],
-             "created_at": row[2], "retry_after": None}
-            for row in cursor.fetchall()
-        ]
+        with self._lock:
+            cursor = self._conn.execute("""
+                SELECT id, task_type, queued_at
+                FROM pending_summaries
+                WHERE status IN ('pending', 'processing')
+                ORDER BY queued_at ASC
+                LIMIT ?
+            """, (limit,))
+            return [
+                {"work_id": row[0], "task_type": row[1], "supersede_key": row[0],
+                 "created_at": row[2], "retry_after": None}
+                for row in cursor.fetchall()
+            ]
 
     def list_failed(self) -> list[dict]:
         """List items in failed (dead letter) status.
@@ -624,19 +636,20 @@ class PendingSummaryQueue:
         Returns list of dicts with id, collection, task_type, attempts,
         last_error, queued_at.
         """
-        cursor = self._conn.execute("""
-            SELECT id, collection, task_type, attempts, last_error, queued_at
-            FROM pending_summaries
-            WHERE status = 'failed'
-            ORDER BY queued_at ASC
-        """)
-        return [
-            {
-                "id": row[0], "collection": row[1], "task_type": row[2],
-                "attempts": row[3], "last_error": row[4], "queued_at": row[5],
-            }
-            for row in cursor.fetchall()
-        ]
+        with self._lock:
+            cursor = self._conn.execute("""
+                SELECT id, collection, task_type, attempts, last_error, queued_at
+                FROM pending_summaries
+                WHERE status = 'failed'
+                ORDER BY queued_at ASC
+            """)
+            return [
+                {
+                    "id": row[0], "collection": row[1], "task_type": row[2],
+                    "attempts": row[3], "last_error": row[4], "queued_at": row[5],
+                }
+                for row in cursor.fetchall()
+            ]
 
     def retry_failed(self) -> int:
         """Reset all failed items back to pending for retry.

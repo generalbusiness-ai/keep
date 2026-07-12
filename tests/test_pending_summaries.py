@@ -625,3 +625,51 @@ class TestPendingSummaryQueue:
             assert len(delegated) == 1
 
             queue.close()
+
+
+class TestQueueThreadSafety:
+    """The queue shares one sqlite connection across daemon threads.
+
+    Regression tests for unlocked readers racing the processor thread's
+    BEGIN IMMEDIATE transactions on the same connection (which raised
+    "cannot start a transaction within a transaction" / recursive-cursor
+    errors under load).
+    """
+
+    def test_readers_are_serialized_with_writers(self):
+        """stats/list/count must not corrupt concurrent dequeue transactions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue = PendingSummaryQueue(Path(tmpdir) / "pending.db")
+            errors: list[Exception] = []
+
+            def writer():
+                try:
+                    for i in range(200):
+                        queue.enqueue(f"doc{i % 20}", "default", "content")
+                        for item in queue.dequeue(limit=3):
+                            queue.complete(item.id, item.collection,
+                                           task_type=item.task_type)
+                except Exception as exc:  # pragma: no cover - failure path
+                    errors.append(exc)
+
+            def reader():
+                try:
+                    for _ in range(200):
+                        queue.stats()
+                        queue.stats_by_type()
+                        queue.list_pending(limit=5)
+                        queue.list_failed()
+                        queue.count()
+                        queue.count_delegated()
+                except Exception as exc:  # pragma: no cover - failure path
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=writer)]
+            threads += [threading.Thread(target=reader) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+            queue.close()
+
+            assert errors == [], f"concurrent queue access raised: {errors}"
