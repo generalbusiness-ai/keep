@@ -172,7 +172,13 @@ class TestDualWriteRecovery:
     """Tests for partial failures during dual-write to doc store + vector store."""
 
     def test_doc_store_ok_vector_store_fails(self, mock_providers, tmp_path):
-        """If ChromaDB fails after doc store write, doc should still exist."""
+        """If ChromaDB fails after the doc store commit, put() succeeds.
+
+        The doc store is canonical: the note is preserved and the vector
+        index heals through a queued reindex (matching the deferred-
+        embedding recovery path) instead of raising after the data is
+        already committed.
+        """
         kp = Keeper(store_path=tmp_path)
         embed = mock_providers["embedding"]
 
@@ -180,6 +186,7 @@ class TestDualWriteRecovery:
         kp.put("warmup", id="_w")
         kp.delete("_w")
         embed.embed_calls = 0
+        kp._pending_queue._queue.clear()
 
         # Wrap the vector store to fail on next upsert
         real_store = kp._store
@@ -187,18 +194,24 @@ class TestDualWriteRecovery:
         kp._store = failing_store
         failing_store.fail_upsert = True
 
-        # put() should raise via the flow wrapper's binding-error surface.
-        with pytest.raises(ValueError, match="ChromaDB simulated"):
-            kp.put("important content", id="doc1")
+        item = kp.put("important content", id="doc1")
+        assert item.id == "doc1"
 
-        # Doc store should have the record (written first)
+        # Doc store has the record (written first, canonical)
         doc = kp._document_store.get("default", "doc1")
         assert doc is not None
         assert doc.summary == "important content"
 
-        # Vector store should NOT have it
+        # Vector store does NOT have it ...
         chroma_coll = kp._resolve_chroma_collection()
         assert real_store.get(chroma_coll, "doc1") is None
+
+        # ... but a reindex is queued to heal the index
+        queued = [
+            i for i in kp._pending_queue._queue
+            if i["id"] == "doc1" and i.get("task_type") == "reindex"
+        ]
+        assert len(queued) == 1
 
         kp.close()
 

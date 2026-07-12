@@ -3314,30 +3314,62 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                 self._document_store.max_version(doc_coll, id)
                 if existing_doc is not None and content_changed else 0
             )
-            if max_ver > 0:
-                with _tracer.start_as_current_span("chroma.upsert_batch"):
-                    if old_embedding is None:
-                        old_embedding = self._get_embedding_provider().embed(existing_doc.summary)
-                    self._store.upsert_with_version(
-                        collection=chroma_coll,
-                        id=id,
-                        embedding=embedding,
-                        summary=final_summary,
-                        tags=casefold_tags_for_index(merged_tags),
-                        version_id=f"{id}@v{max_ver}",
-                        version=max_ver,
-                        version_embedding=old_embedding,
-                        version_summary=existing_doc.summary,
-                        version_tags=casefold_tags_for_index(existing_doc.tags),
-                    )
-            else:
-                with _tracer.start_as_current_span("chroma.upsert"):
-                    self._store.upsert(
-                        collection=chroma_coll,
-                        id=id,
-                        embedding=embedding,
-                        summary=final_summary,
-                        tags=casefold_tags_for_index(merged_tags),
+            try:
+                if max_ver > 0:
+                    with _tracer.start_as_current_span("chroma.upsert_batch"):
+                        if old_embedding is None:
+                            old_embedding = self._get_embedding_provider().embed(existing_doc.summary)
+                        self._store.upsert_with_version(
+                            collection=chroma_coll,
+                            id=id,
+                            embedding=embedding,
+                            summary=final_summary,
+                            tags=casefold_tags_for_index(merged_tags),
+                            version_id=f"{id}@v{max_ver}",
+                            version=max_ver,
+                            version_embedding=old_embedding,
+                            version_summary=existing_doc.summary,
+                            version_tags=casefold_tags_for_index(existing_doc.tags),
+                        )
+                else:
+                    with _tracer.start_as_current_span("chroma.upsert"):
+                        self._store.upsert(
+                            collection=chroma_coll,
+                            id=id,
+                            embedding=embedding,
+                            summary=final_summary,
+                            tags=casefold_tags_for_index(merged_tags),
+                        )
+            except Exception as exc:
+                # The document store is canonical and already committed above.
+                # If the vector write fails (Chroma lock timeout, disk error),
+                # recover the same way as the deferred-embedding branch: drop
+                # any stale vector row and enqueue a reindex so semantic
+                # search heals instead of serving the old embedding forever.
+                logger.warning("Vector index write failed for %s; scheduling reindex: %s", id, exc)
+                try:
+                    self._store.delete_entries(chroma_coll, [id])
+                except Exception:
+                    logger.debug("Could not drop stale vector row for %s", id, exc_info=True)
+                self._pending_queue.enqueue(
+                    id,
+                    doc_coll,
+                    final_summary,
+                    task_type="reindex",
+                    metadata={"tags": dict(merged_tags)},
+                )
+                if max_ver > 0:
+                    # The archived version's vector row also failed to write.
+                    self._pending_queue.enqueue(
+                        f"{id}@v{max_ver}",
+                        doc_coll,
+                        existing_doc.summary,
+                        task_type="reindex",
+                        metadata={
+                            "version": max_ver,
+                            "base_id": id,
+                            "tags": dict(existing_doc.tags),
+                        },
                     )
         elif is_system_doc:
             self._store.delete(chroma_coll, id, delete_versions=True)
@@ -4184,13 +4216,18 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         # Hydrate search hits from canonical SQLite tags so user tags remain
         # available even when Chroma metadata stores marker fields only.
         with _get_tracer("keeper").start_as_current_span("hydrate"):
-            hydrated: list[Item] = []
-            for item in items:
-                base_id = item.tags.get(
+            base_ids = [
+                item.tags.get(
                     "_base_id",
                     item.id.split("@")[0] if "@" in item.id else item.id,
                 )
-                head = self._document_store.get(doc_coll, base_id)
+                for item in items
+            ]
+            # Batched: one SELECT for all hits, not one per result item
+            heads = self._document_store.get_many(doc_coll, base_ids)
+            hydrated: list[Item] = []
+            for item, base_id in zip(items, base_ids):
+                head = heads.get(base_id)
                 if head is None:
                     hydrated.append(item)
                     continue
@@ -4547,12 +4584,18 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         # Enrich tags from SQLite (ChromaDB stores casefolded values;
         # SQLite has the canonical original-case values for display)
         def _enrich_from_sqlite(items_to_enrich):
+            if not items_to_enrich:
+                return []
+            # One batched fetch for all result IDs plus the base IDs of
+            # part/version results ("id@...") — not one SELECT per item.
+            ids = [item.id for item in items_to_enrich]
+            base_ids = [item.id.split("@")[0] for item in items_to_enrich if "@" in item.id]
+            docs = self._document_store.get_many(doc_coll, ids + base_ids)
             enriched = []
             for item in items_to_enrich:
-                doc = self._document_store.get(doc_coll, item.id)
+                doc = docs.get(item.id)
                 if not doc and "@" in item.id:
-                    base_id = item.id.split("@")[0]
-                    doc = self._document_store.get(doc_coll, base_id)
+                    doc = docs.get(item.id.split("@")[0])
                 if doc:
                     enriched_item = _record_to_item(doc, score=item.score)
                     tags = enriched_item.tags
@@ -5035,6 +5078,19 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                 embedding=archived_embedding,
                 summary=restored.summary,
                 tags=casefold_tags_for_index(restored.tags),
+            )
+        else:
+            # The archived version has no embedding (e.g. it was deferred at
+            # write time). Drop the stale pre-revert vector row and schedule
+            # a reindex so semantic search reflects the restored content
+            # instead of silently serving the old embedding.
+            self._store.delete_entries(chroma_coll, [id])
+            self._pending_queue.enqueue(
+                id,
+                doc_coll,
+                restored.summary,
+                task_type="reindex",
+                metadata={"tags": dict(restored.tags)},
             )
 
         # Delete the versioned entry from ChromaDB

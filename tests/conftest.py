@@ -738,7 +738,23 @@ class MockDocumentStore:
         return {"prev": []}
 
     def restore_latest_version(self, collection: str, id: str):
-        return None
+        """Promote the latest archived version to current.
+
+        Mirrors the real store: replace the current doc, then drop that
+        version row.
+        """
+        versions = self._versions.get((collection, id), [])
+        if not versions or id not in self._data.get(collection, {}):
+            return None
+        latest = max(versions, key=lambda rec: rec["version"])
+        versions.remove(latest)
+        cur = self._data[collection][id]
+        cur["summary"] = latest["summary"]
+        cur["tags"] = dict(latest["tags"])
+        if latest.get("content_hash") is not None:
+            cur["content_hash"] = latest["content_hash"]
+        self._enqueue_sync_outbox("doc_update", collection, id)
+        return self.get(collection, id)
 
     def list_collections(self) -> list[str]:
         return list(self._data.keys())

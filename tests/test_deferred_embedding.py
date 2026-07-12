@@ -602,3 +602,87 @@ class TestNullPendingQueueSignature:
         # Should not raise
         q.enqueue("id", "coll", "content", task_type="embed", metadata={"key": "val"})
         assert q.count() == 0  # still no-ops
+
+
+class TestVectorWriteRecovery:
+    """A ChromaDB write failure after the canonical doc-store commit.
+
+    These must self-heal via a queued reindex instead of leaving stale
+    vectors in the index.
+    """
+
+    def _warm(self, kp):
+        # Trigger system doc setup with a throwaway put, then reset state
+        kp.put("warmup", id="_warmup")
+        kp.delete("_warmup")
+        kp._pending_queue._queue.clear()
+
+    def test_local_put_chroma_failure_enqueues_reindex(self, mock_providers, tmp_path):
+        kp = Keeper(store_path=tmp_path)
+        self._warm(kp)
+
+        with patch.object(kp._store, "upsert", side_effect=RuntimeError("chroma down")):
+            item = kp.put("hello world", id="doc-vecfail")
+
+        # put() succeeds: the doc store is canonical and committed
+        assert item.id == "doc-vecfail"
+        doc = kp._document_store.get("default", "doc-vecfail")
+        assert doc is not None
+        assert doc.summary == "hello world"
+
+        # ... and the vector index heals through a queued reindex
+        queued = [
+            i for i in kp._pending_queue._queue
+            if i["id"] == "doc-vecfail" and i.get("task_type") == "reindex"
+        ]
+        assert len(queued) == 1
+
+    def test_version_archive_chroma_failure_enqueues_both_reindexes(
+        self, mock_providers, tmp_path,
+    ):
+        kp = Keeper(store_path=tmp_path)
+        self._warm(kp)
+        kp.put("original content", id="doc-v")
+        kp._pending_queue._queue.clear()
+
+        with patch.object(
+            kp._store, "upsert_with_version", side_effect=RuntimeError("chroma down"),
+        ):
+            kp.put("changed content", id="doc-v")
+
+        queued = {
+            i["id"] for i in kp._pending_queue._queue
+            if i.get("task_type") == "reindex"
+        }
+        # Both the current row and the archived version row failed to write
+        assert "doc-v" in queued
+        assert "doc-v@v1" in queued
+
+    def test_revert_without_archived_embedding_enqueues_reindex(
+        self, mock_providers, tmp_path,
+    ):
+        """Regression test for stale embeddings after revert.
+
+        revert() left the pre-revert embedding in ChromaDB when the
+        archived version had no embedding of its own.
+        """
+        kp = Keeper(store_path=tmp_path)
+        self._warm(kp)
+        kp.put("original", id="doc-r")
+        kp.put("changed", id="doc-r")  # archives v1
+        kp._pending_queue._queue.clear()
+
+        chroma_coll = kp._resolve_chroma_collection()
+        with patch.object(kp._store, "get_embedding", return_value=None):
+            item = kp.revert("doc-r")
+
+        assert item is not None
+        assert kp._document_store.get("default", "doc-r").summary == "original"
+        # Stale pre-revert vector row is dropped ...
+        assert kp._store.get(chroma_coll, "doc-r") is None
+        # ... and a reindex is queued so search reflects the restored content
+        queued = [
+            i for i in kp._pending_queue._queue
+            if i["id"] == "doc-r" and i.get("task_type") == "reindex"
+        ]
+        assert len(queued) == 1
