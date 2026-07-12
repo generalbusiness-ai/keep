@@ -119,3 +119,108 @@ re-audited:
 (remote/daemon code, periphery/plugins/CI, tests/perf/DX/direction) plus a
 verification pass over the prior `TECH_DEBT_AUDIT.md`. Every planned finding was
 re-confirmed by opening the cited code directly.*
+
+---
+
+# Audit 2026-07-11 — v0.159.0 @ `59dcd7a`
+
+Deep audit: seven parallel read-only passes (correctness, security,
+performance, tests, architecture/debt, deps/DX/docs, direction), every
+finding re-vetted against the cited code. Full suite at audit time:
+2571 passed / 1 skipped. Reconciled against the 2026-06 batch above —
+all seven prior plans verified still DONE and test-guarded.
+
+## Fixed directly in the audit session (2026-07-11, uncommitted)
+
+The maintainer selected the top five findings for direct fixes rather
+than plans. All landed with regression tests; suite afterward:
+**2578 passed / 1 skipped**, ruff clean.
+
+| # | Fix | Files | Tests added |
+|---|-----|-------|-------------|
+| 1 | Queue readers (`count`, `count_delegated`, `stats`, `stats_by_type`, `list_pending`, `list_failed`) now hold `self._lock`; they raced the processor's `BEGIN IMMEDIATE` transactions on the shared sqlite connection. `stats()` snapshots `stats_by_type()` before entering the lock (plain `Lock`, no re-entry). | `keep/pending_summaries.py` | `TestQueueThreadSafety` in `tests/test_pending_summaries.py` |
+| 2 | `find` result hydration + enrichment batched via `get_many` — removed BOTH per-item `get()` loops (the `hydrate` span at former `api.py:4225` and `_enrich_from_sqlite`). Verified `get_many` field coverage matches `_record_to_item` needs. | `keep/api.py` | `TestFindEnrichmentBatching` in `tests/test_find_tags.py` |
+| 3 | Chroma write failure after the canonical doc-store commit in put no longer leaves a permanently stale index: the write is guarded; on failure the stale vector row is dropped and reindex tasks are queued for the doc (and the archived version when one was being written), mirroring the deferred-embedding branch. **Contract change**: put() now succeeds and self-heals instead of raising after commit — `test_doc_store_ok_vector_store_fails` was updated to pin the new contract. | `keep/api.py` | `TestVectorWriteRecovery` (2 tests) in `tests/test_deferred_embedding.py`; updated `tests/test_failure_modes.py` |
+| 4 | `revert()` with an embedding-less archived version now drops the stale pre-revert vector row and queues a reindex (previously it silently kept serving the old embedding). `MockDocumentStore.restore_latest_version` was a `return None` stub — implemented faithfully so revert is now testable against mocks. | `keep/api.py`, `tests/conftest.py` | revert test in `TestVectorWriteRecovery` |
+| 5 | Incremental markdown-mirror writes and deletes now enforce the same path containment as the full export (`_resolve_export_destination`): the incremental write site, the full-replan copy loop, and `_delete_rel_path` (which the stale-ref prune paths now route through). Escapes are skipped with a warning. | `keep/markdown_mirrors.py` | 2 tests in `tests/test_markdown_mirrors.py` incl. poisoned-map integration test |
+
+Post-fix review (2026-07-12) caught two defects in the fixes above; both
+corrected in-session, suite **2581 passed / 1 skipped**, ruff clean:
+
+- **Fix 5 follow-up**: `_delete_rel_path` unlinked the *resolved* path, so
+  deleting a stale in-root symlink followed it and deleted the linked note.
+  Now validates with the resolved path but unlinks the lexical path (the
+  link itself); symlinks resolving outside the root are skipped with a
+  warning. Regression test: `test_delete_rel_path_unlinks_symlink_not_target`.
+- **Fix 2 follow-up**: the batched `get_many`/`touch_many` calls passed
+  unbounded ID lists into a single `IN (...)`, breaking at SQLite's
+  variable limit (`too many SQL variables`, 32,766 modern / 999 legacy).
+  Both now dedupe and chunk at `SQL_VAR_CHUNK = 900`
+  (`keep/document_store.py`). Regression tests drive 40k+ IDs against the
+  real store: `TestGetManyChunking` in `tests/test_document_store.py`.
+
+## Remediation backlog (not yet planned — expand any row into a numbered plan on request)
+
+Ordered by leverage. Evidence line numbers are as of `59dcd7a` and may
+have drifted slightly after the session's fixes.
+
+| ID | Task | Category | Effort | Evidence / sketch |
+|----|------|----------|--------|-------------------|
+| R1 | Guard the full-replan fallback in the mirror poll loop: an exception inside the `except _IncrementalExportNeedsFullReplan:` handler (`markdown_mirrors.py` ~`:1059-1068`) escapes the per-entry try, skipping `save_markdown_mirrors` — earlier entries' state mutations are lost and `last_error` never recorded. Restructure so both paths share one error guard (e.g. set a `need_full_replan` flag inside the try, run the fallback after it, under its own `except Exception` that sets `entry.last_error` and bumps `stats["errors"]`). | bug | S | Confirmed control flow; add a test where the fallback raises |
+| R2 | Run the OpenClaw plugin's TS tests in CI: `keep/data/openclaw-plugin/src/index.test.ts` (476 lines, `"test": "npx tsx --test src/index.test.ts"` in package.json) never runs — CI does only `npm ci` + `node build.mjs` (`.github/workflows/test.yml:31-34`). Add an `npm test` step in the existing working-directory block. | tests | S | HIGH confidence, shipped-artifact coverage |
+| R3 | Add `macos-latest` to the CI matrix (`test.yml:11` is ubuntu-only). Daemon reaping/signal paths (`tests/conftest.py:1442-1513`, POSIX `ps`) currently run in CI on neither the dev platform (darwin) nor Windows. Windows leg is a separate, larger task (port the `ps`-based reaper). | tests | S | |
+| R4 | Batch the deep-follow SQLite access in `_search_augmentation.py`: per-candidate head-doc `get` at `:241` and `:512` (swap to `get_many`, same shape as the session's api.py fix); per-primary edge queries incl. nested two-hop at `:405-433` (~230 serial queries worst case — needs `get_inverse_edges_many`/`get_forward_edges_many` grouped by target/source); full-collection `tag_pair_counts` json_each scan (`document_store.py:3919`) recomputed per deep tag-follow for IDF (`:185-187`) — memoize keyed on a doc-generation counter or short TTL. | perf | M | Three sub-items; the `get_many` swaps are S and independent |
+| R5 | MCP 2.0 migration spike: `mcp>=1.0,<2.0` (`pyproject.toml`); 2.0 GA targeted ~2026-07-27, 1.x then maintenance-only. Port the stdio server on a branch against the 2.0 beta; coordinate with the OpenClaw plugin's bundled `@modelcontextprotocol/sdk` (^1.12.1). Time-sensitive. | deps | M | Public integration surface; regressions break every MCP client |
+| R6 | Extend `tests/test_remote_fakeserver.py` beyond 500/404: injected 401/403/429 (the `X-Fake-Status` hook at `:208` already exists), a connect-refused case (closed port), and a timeout case (sleeping handler); assert the client's surfaced error type/message. | tests | M | |
+| R7 | Add a small real-backend ranking test that runs in default CI: hybrid-search ranking (`tests/test_hybrid_search.py`) currently asserts only against hash-embedding mocks and a substring FTS shim; real cosine + FTS5/BM25 ordering runs only under deselected markers. A tiny real-store corpus with a handful of ordering assertions, kept fast enough to stay unmarked. | tests | M | Core-feature regressions currently pass CI |
+| R8 | Wire coverage into one CI leg (`pytest --cov`; `[tool.coverage]` config exists unused at `pyproject.toml:202-219`) and add pyright scoped to the public API modules (no type checker exists at all). Widen scope over time. | DX | S–M | |
+| R9 | Daemon request-body size cap: `_read_body` (`daemon_server.py:418-428`) buffers unbounded `Content-Length`. Reject above a configurable ceiling with 413 before reading; size against real `put` payloads; consider the NDJSON stream too. Low severity (loopback + auth) but S-effort. | security | S | |
+| R10 | `shlex.quote(str(store_path))` in the mcpb wrapper (`mcpb.py:124-128` builds a shell script via unescaped f-string). Latent injection sink; S. | security | S | |
+| R11 | Investigate Claude Code hook quoting: `claude-code-plugin/hooks/hooks.json` embeds `${.prompt\|text}` / `${.last_assistant_message}` inside single-quoted shell strings. Determine the host's escaping contract; if literal substitution, restructure to stdin/env (`keep now --stdin`). Investigation first — LOW confidence it's exploitable. | security | S | |
+| R12 | Decompose `_find_direct` (`api.py:3929`, ~668 lines, 13 params — largest function in the repo, highest-churn path) behind characterization tests: extract deep-follow, RRF-merge, and scope-filter stages. Do R7's ranking tests first as the safety net. Second tier: `console_support.warn()` ~316 lines, `_process_pending_reindex_items` ~267. | debt | L | Grows more expensive monthly |
+| R13 | Resolve the thin-CLI drift: `later/design/design-thin-cli.md` says the CLI must not construct `Keeper`; `cli_app.py:2537,:3215` do (pending/import), and the file grew +837 LOC (3,264) from remote-backend work. Either retire the design doc and amend AGENTS.md to describe the real split, or plan the migration of those two branches to daemon flows. A decision, then S (docs) or L (migrate). | debt | S/L | |
+| R14 | Contributor-experience batch: CONTRIBUTING.md has no dev bootstrap and its Releases block contradicts `docs/RELEASING.md` (manual twine, bypasses the checklist) — replace with a pointer; document the Node prerequisite for local wheel builds (`hatch_build.py:23-28` hard-fails without the plugin bundle); reconcile `.githooks/` vs `pre-commit install` (the commit-msg guard never runs via the documented path); remove the stale foreign `.vscode/settings.json` entries; add `.editorconfig`. | DX/docs | S | One plan, five small items |
+| R15 | Test-suite hygiene: `tests/test_sliding_window.py` and `tests/test_summarizers.py` collect 0 tests (manual scripts — move to `scripts/` or convert); delete the empty `tests/test_review_fixes.py` placeholder; add characterization tests for `console_support.py` (churn #1, 2,752 LOC, no dedicated test file) before its next refactor. | tests | S–M | |
+| R16 | Batch part embeds on the normal ingest path: analysis fans a doc into K parts, each embedded via a single `provider.embed` call (`_background_processing.py:807-821,951`); the `embed_batch` collect→upsert pattern exists only on the reindex fast path (`:1163-1208`). Group same-batch embed items in `process_work_batch`. | perf | M | Provider-dependent win |
+| R17 | Investigate the legacy meta-query cross-product (`_context_resolution.py:985-1008`): M query-lines × C context-values = M×C separate `list_items` calls. First determine whether the legacy path is still hit (the state-doc flow is primary); if so, batch into a tag-OR query or memoize via the context cache. | perf | S (investigate) | LOW confidence it matters |
+
+## Findings considered and rejected (2026-07-11 vetting)
+
+- **"`store._write_guard` releases an unheld lock if `acquire()` raises"
+  (`store.py:118-136`)** — FALSE POSITIVE. The `acquire()` call at `:124`
+  precedes the `try:` at `:126`, so an exception there propagates out of
+  `__enter__` before the `finally` exists; no unheld release occurs.
+- **Python 3.14 support** — correctly blocked upstream by chromadb
+  (pydantic.v1 shim + hnswlib build failure); tracked, nothing to do here
+  until chromadb lands support. Do not raise the cap early.
+- **"Abandoned dependencies"** — checked; tinytag, pypdfium2, questionary,
+  chromadb all actively maintained (2026 releases). `httpx<1.0` /
+  `pydantic<3.0` caps are at current majors, not lag.
+- **User docs staleness** — spot-checked KEEP-FIND / QUICKSTART / README
+  against `cli_app.py`: accurate, flag-for-flag. No doc findings.
+
+## Direction options (maintainer to weigh; not ranked against defects)
+
+1. **OPML/RSS feed ingest** — top of `later/todo.txt`, full phased design
+   in `later/design/design-opml-feed-import.md`, zero code exists. Most
+   shovel-ready feature.
+2. **Multi-tenant isolation investigation** — `tenant`/`namespace` stubbed
+   "future" in `planner_stats.py:45-63`; hosted scoping is a single
+   `project` field; enforcement lives in the sibling `keepmem` repo.
+   Gating question for the commercial service; investigate, don't build.
+3. **Plugin surface via entry points** — `keep.backends` entry-point group
+   ships unused (`backend.py`); actions/providers/analyzers are one
+   discovery hook away from third-party pluggability (todo.txt repeatedly
+   asks for rerankers/taggers/swappable vector store).
+4. **Bidirectional markdown sync** — export/mirrors mature, write-back is
+   an explicit non-goal; two policy drafts exist because conflict
+   authority is subtle. High value, HIGH risk.
+5. **Local web UI** (`design-keep-ui.md`) — daemon already serves the API
+   it needs; largest effort, most product-shaped payoff.
+
+---
+
+*Source: improve skill (deep effort), 2026-07-11. Seven parallel read-only
+audit passes; every finding in the fixed/backlog tables re-confirmed by
+opening the cited code. Fixes 1–5 implemented and reviewed in-session at
+the maintainer's direction; suite 2578 passed / 1 skipped, ruff clean.*
