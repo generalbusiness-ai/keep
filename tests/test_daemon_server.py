@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +89,15 @@ def test_request_threads_release_document_store_connections(daemon, http):
         r = http.post("/v1/notes", json={"content": f"burst note {i}", "id": f"burst-{i}"})
         assert r.status_code == 200
 
+    # The release hook runs in the request thread's `finally` block, after the
+    # response body has been flushed to the client — so the last increment can
+    # land just after the final HTTP response is read here. Poll briefly rather
+    # than asserting instantly; the invariant is that every request eventually
+    # releases its connection.
+    deadline = time.monotonic() + 5.0
+    while (kp._document_store.release_thread_connection_calls < baseline + 20
+           and time.monotonic() < deadline):
+        time.sleep(0.01)
     assert kp._document_store.release_thread_connection_calls == baseline + 20
 
 
