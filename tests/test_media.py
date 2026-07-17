@@ -95,7 +95,12 @@ class TestMediaConfig:
 
         config = StoreConfig(path=tmp_path, config_dir=tmp_path, media=None)
         save_config(config)
-        with patch("keep.config._detect_ollama", return_value=None):
+        # Media re-detection must find nothing regardless of which optional
+        # packages (mlx-vlm, mlx-whisper) happen to be installed locally.
+        with (
+            patch("keep.config._detect_ollama", return_value=None),
+            patch("keep.config._local_dependency_available", return_value=False),
+        ):
             loaded = load_config(tmp_path)
 
         assert loaded.media is None
@@ -365,7 +370,12 @@ class TestAfterWriteDispatch:
         mock_providers["document"].fetch = lambda uri: mock_doc
 
         monkeypatch.delenv("KEEP_CONFIG", raising=False)
-        with patch("keep.config._detect_ollama", return_value=None):
+        # Media re-detection must find nothing regardless of which optional
+        # packages (mlx-vlm, mlx-whisper) happen to be installed locally.
+        with (
+            patch("keep.config._detect_ollama", return_value=None),
+            patch("keep.config._local_dependency_available", return_value=False),
+        ):
             kp = Keeper(store_path=tmp_path)
         _keeper_bootstrap_sysdocs(kp)
         assert kp._config.media is None
