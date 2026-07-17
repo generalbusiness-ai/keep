@@ -188,19 +188,18 @@ class MockChromaStore:
 
     def get(self, collection: str, id: str):
         from keep.store import StoreResult
-        if collection not in self._data or id not in self._data[collection]:
+        # Atomic snapshot: the real stores never raise KeyError when a
+        # concurrent delete lands between an existence check and the read.
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
             return None
-        rec = self._data[collection][id]
         return StoreResult(id=id, summary=rec["summary"], tags=rec["tags"])
 
     def exists(self, collection: str, id: str) -> bool:
         return collection in self._data and id in self._data[collection]
 
     def delete(self, collection: str, id: str, delete_versions: bool = True) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            del self._data[collection][id]
-            return True
-        return False
+        return self._data.get(collection, {}).pop(id, None) is not None
 
     def _match_where(self, tags: dict, where: dict | None) -> bool:
         """Check if tags match a ChromaDB where clause.
@@ -268,17 +267,16 @@ class MockChromaStore:
         return len(self._data.get(collection, {}))
 
     def get_embedding(self, collection: str, id: str) -> list[float] | None:
-        if collection in self._data and id in self._data[collection]:
-            return self._data[collection][id].get("embedding")
-        return None
+        rec = self._data.get(collection, {}).get(id)
+        return rec.get("embedding") if rec is not None else None
 
     def get_entries_full(self, collection: str, ids: list[str]) -> list[dict]:
         results = []
         if collection not in self._data:
             return results
         for id in ids:
-            if id in self._data[collection]:
-                rec = self._data[collection][id]
+            rec = self._data[collection].get(id)
+            if rec is not None:
                 results.append({
                     "id": id,
                     "embedding": rec.get("embedding"),
@@ -331,12 +329,11 @@ class MockChromaStore:
         self.upsert(collection, part_id, embedding, summary, part_tags)
 
     def delete_parts(self, collection: str, id: str) -> int:
-        if collection not in self._data:
+        coll = self._data.get(collection)
+        if coll is None:
             return 0
-        part_ids = [k for k in self._data[collection] if k.startswith(f"{id}@p")]
-        for pid in part_ids:
-            del self._data[collection][pid]
-        return len(part_ids)
+        part_ids = [k for k in list(coll) if k.startswith(f"{id}@p")]
+        return sum(1 for pid in part_ids if coll.pop(pid, None) is not None)
 
     def delete_entries(self, collection: str, ids: list[str]) -> None:
         if collection in self._data:
@@ -351,26 +348,29 @@ class MockChromaStore:
         return {id for id in ids if id not in existing}
 
     def update_summary(self, collection: str, id: str, summary: str) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            self._data[collection][id]["summary"] = summary
-            return True
-        return False
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
+            return False
+        rec["summary"] = summary
+        return True
 
     def update_tags(self, collection: str, id: str, tags: dict) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            self._data[collection][id]["tags"] = tags
-            self._data[collection][id]["metadata"] = self._to_metadata(tags)
-            return True
-        return False
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
+            return False
+        rec["tags"] = tags
+        rec["metadata"] = self._to_metadata(tags)
+        return True
 
     def rewrite_tags(self, collection: str, id: str, tags: dict) -> bool:
         """Rewrite metadata without semantic changes (migration helper)."""
         return self.update_tags(collection, id, tags)
 
     def has_tag_markers(self, collection: str, id: str) -> bool:
-        if collection not in self._data or id not in self._data[collection]:
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
             return False
-        metadata = self._data[collection][id].get("metadata", {})
+        metadata = rec.get("metadata", {})
         return any(
             k.startswith(self._tag_key_prefix) or k.startswith(self._tag_value_prefix)
             for k in metadata
@@ -441,15 +441,17 @@ class MockDocumentStore:
                archive: bool = True) -> tuple["DocumentRecord", bool]:
         if collection not in self._data:
             self._data[collection] = {}
-        existed = id in self._data[collection]
+        # Atomic snapshot: derive everything from one read so a concurrent
+        # delete cannot KeyError between an existence check and the access.
+        existing = self._data[collection].get(id)
+        existed = existing is not None
         content_changed = (
             existed
             and content_hash is not None
-            and self._data[collection][id].get("content_hash") != content_hash
+            and existing.get("content_hash") != content_hash
         )
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
-        existing = self._data[collection].get(id)
         existing_created = existing.get("created_at") if existing else None
         created_at = existing_created or created_at or now
         if existed and archive and existing is not None:
@@ -486,9 +488,10 @@ class MockDocumentStore:
         return (self._make_record(collection, id, self._data[collection][id]), content_changed)
 
     def get(self, collection: str, id: str):
-        if collection not in self._data or id not in self._data[collection]:
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
             return None
-        return self._make_record(collection, id, self._data[collection][id])
+        return self._make_record(collection, id, rec)
 
     def get_many(self, collection: str, ids: list[str]) -> dict:
         result = {}
@@ -537,8 +540,7 @@ class MockDocumentStore:
         return None
 
     def delete(self, collection: str, id: str, delete_versions: bool = True) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            del self._data[collection][id]
+        if self._data.get(collection, {}).pop(id, None) is not None:
             self._enqueue_sync_outbox("doc_delete", collection, id)
             return True
         return False
@@ -556,34 +558,38 @@ class MockDocumentStore:
         return len(self._versions.get((collection, id), []))
 
     def update_tags(self, collection: str, id: str, tags: dict) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            self._data[collection][id]["tags"] = tags
-            self._enqueue_sync_outbox("doc_update", collection, id)
-            return True
-        return False
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
+            return False
+        rec["tags"] = tags
+        self._enqueue_sync_outbox("doc_update", collection, id)
+        return True
 
     def patch_head_tags(self, collection: str, id: str, patch: dict) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            self._data[collection][id]["tags"].update(patch)
-            self._enqueue_sync_outbox("doc_update", collection, id)
-            return True
-        return False
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
+            return False
+        rec["tags"].update(patch)
+        self._enqueue_sync_outbox("doc_update", collection, id)
+        return True
 
     def update_summary(self, collection: str, id: str, summary: str) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            self._data[collection][id]["summary"] = summary
-            self._enqueue_sync_outbox("doc_update", collection, id)
-            return True
-        return False
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
+            return False
+        rec["summary"] = summary
+        self._enqueue_sync_outbox("doc_update", collection, id)
+        return True
 
     def update_content_hash(self, collection: str, id: str,
                             content_hash: str, content_hash_full: str) -> bool:
-        if collection in self._data and id in self._data[collection]:
-            self._data[collection][id]["content_hash"] = content_hash
-            self._data[collection][id]["content_hash_full"] = content_hash_full
-            self._enqueue_sync_outbox("doc_update", collection, id)
-            return True
-        return False
+        rec = self._data.get(collection, {}).get(id)
+        if rec is None:
+            return False
+        rec["content_hash"] = content_hash
+        rec["content_hash_full"] = content_hash_full
+        self._enqueue_sync_outbox("doc_update", collection, id)
+        return True
 
     def list_recent(
         self,
@@ -663,11 +669,13 @@ class MockDocumentStore:
         return max((rec["version"] for rec in versions), default=0)
 
     def copy_record(self, collection: str, from_id: str, to_id: str):
-        if collection not in self._data or from_id not in self._data[collection]:
+        coll = self._data.get(collection)
+        if coll is None or to_id in coll:
             return None
-        if to_id in self._data[collection]:
+        source = coll.get(from_id)
+        if source is None:
             return None
-        self._data[collection][to_id] = dict(self._data[collection][from_id])
+        coll[to_id] = dict(source)
         return self.get(collection, to_id)
 
     def get_version(self, collection: str, id: str, offset: int = 0):
