@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -38,6 +39,24 @@ from .const import (
 logger = logging.getLogger(__name__)
 
 _URI_SCHEME_PATTERN = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*://')
+_REDACTED_CONFIG_VALUE = "[REDACTED]"
+_SENSITIVE_CONFIG_NAMES = frozenset({
+    "api_key",
+    "access_token",
+    "auth_token",
+    "authorization",
+    "bearer_token",
+    "client_secret",
+    "credential",
+    "credentials",
+    "oauth_token",
+    "password",
+    "passphrase",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "token",
+})
 
 from .config import get_default_provider_model, get_tool_directory
 from .logging_config import configure_quiet_mode, enable_debug_mode
@@ -1247,6 +1266,77 @@ def expand_prompt(result: "PromptResult", kp=None) -> str:
     return output.strip()
 
 
+def _is_sensitive_config_name(name: str) -> bool:
+    """Return whether an open-ended config field may conventionally be secret.
+
+    Provider parameters are not schema-constrained, so display redaction favors
+    hiding an occasional non-secret value over leaking an unfamiliar credential
+    spelling.  The compact-name checks also cover camelCase forms such as
+    ``apiKey`` without treating unrelated words ending in ``key`` as secrets.
+    """
+    normalized = re.sub(r"[^a-z0-9]+", "_", name.casefold()).strip("_")
+    if normalized in _SENSITIVE_CONFIG_NAMES:
+        return True
+    if any(marker in normalized for marker in (
+        "secret", "passw", "credential",
+    )):
+        return True
+    compact = normalized.replace("_", "")
+    # "token" must match as a whole word ("auth_token") or trailing camelCase
+    # word ("authToken"); substring matching would misfire on benign parameters
+    # such as "max_tokens" and "tokenizer".
+    if "token" in normalized.split("_") or compact.endswith("token"):
+        return True
+    if compact.endswith((
+        "apikey",
+        "accesskey",
+        "clientkey",
+        "encryptionkey",
+        "privatekey",
+        "signingkey",
+    )):
+        return True
+    return normalized.endswith((
+        "_api_key",
+        "_access_token",
+        "_auth_token",
+        "_client_secret",
+        "_oauth_token",
+        "_password",
+        "_private_key",
+        "_refresh_token",
+    ))
+
+
+def _redact_config_value(value: Any, *, field_name: str | None = None) -> Any:
+    """Build a JSON-safe config view with credential fields recursively redacted.
+
+    Path-based config access can return whole dataclasses or nested provider
+    parameter dictionaries.  Sanitizing only the requested leaf would still
+    leak secrets through parent paths such as ``remote`` or
+    ``embedding.params``, so every container is traversed before display.
+    """
+    if field_name is not None and _is_sensitive_config_name(field_name):
+        if value is None or (isinstance(value, str) and value == ""):
+            return value
+        return _REDACTED_CONFIG_VALUE
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _redact_config_value(
+                getattr(value, item.name), field_name=item.name,
+            )
+            for item in fields(value)
+        }
+    if isinstance(value, dict):
+        return {
+            key: _redact_config_value(item, field_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_config_value(item) for item in value]
+    return value
+
+
 def _get_config_value(cfg, store_path: Path, path: str):
     """Get config value by dotted path.
 
@@ -1307,7 +1397,7 @@ def _get_config_value(cfg, store_path: Path, path: str):
 
     # Tags shortcut
     if path == "tags":
-        return cfg.default_tags if cfg else {}
+        return _redact_config_value(cfg.default_tags) if cfg else {}
 
     # Dotted path into config attributes
     if not cfg:
@@ -1329,7 +1419,7 @@ def _get_config_value(cfg, store_path: Path, path: str):
     # Return name for provider objects
     if hasattr(value, "name") and hasattr(value, "params"):
         return value.name
-    return value
+    return _redact_config_value(value, field_name=parts[-1] if parts else None)
 
 
 def _format_config_with_defaults(cfg, store_path: Path) -> str:
@@ -1362,10 +1452,11 @@ def _format_config_with_defaults(cfg, store_path: Path) -> str:
         lines.append(f"  max_inline_length: {cfg.max_inline_length}")
 
         # Show configured tags or example
-        if cfg.default_tags:
+        safe_tags = _redact_config_value(cfg.default_tags)
+        if safe_tags:
             lines.append("")
             lines.append("tags:")
-            for key, value in cfg.default_tags.items():
+            for key, value in safe_tags.items():
                 lines.append(f"  {key}: {value}")
         else:
             lines.append("")
@@ -1374,15 +1465,16 @@ def _format_config_with_defaults(cfg, store_path: Path) -> str:
 
         # Show integrations status
         from .integrations import TOOL_CONFIGS
-        if cfg.integrations:
+        safe_integrations = _redact_config_value(cfg.integrations)
+        if safe_integrations:
             lines.append("")
             lines.append("integrations:")
             for tool_key in TOOL_CONFIGS:
-                if tool_key in cfg.integrations:
-                    status = cfg.integrations[tool_key]
+                if tool_key in safe_integrations:
+                    status = safe_integrations[tool_key]
                     lines.append(f"  {tool_key}: {status}")
             for tool_key in TOOL_CONFIGS:
-                if tool_key not in cfg.integrations:
+                if tool_key not in safe_integrations:
                     lines.append(f"  # {tool_key}: false")
         else:
             lines.append("")

@@ -51,6 +51,7 @@ from .console_support import (
     _get_config_value,
     _get_keeper,
     _progress_bar,
+    _redact_config_value,
     doctor as doctor_impl,
     get_tool_directory,
     print_pending_interactive,
@@ -2726,7 +2727,9 @@ def config(
             },
         }
         if cfg and cfg.default_tags:
-            result["tags"] = cfg.default_tags
+            # Config values are always display-sanitized, including uncommon
+            # secret-shaped default tag names.
+            result["tags"] = _redact_config_value(cfg.default_tags)
         typer.echo(json.dumps(result, indent=2))
     else:
         typer.echo(_format_config_with_defaults(cfg, Path(str(store_path))))

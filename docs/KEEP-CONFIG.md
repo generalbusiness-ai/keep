@@ -385,6 +385,7 @@ keep doctor                           # Check providers, store, integrations
 | `providers.embedding` | Embedding provider name |
 | `providers.summarization` | Summarization provider name |
 | `providers.media` | Media description provider name |
+| `remote` | Remote backend configuration, with credentials redacted |
 
 Subpath output is raw (unquoted) for shell scripting:
 
@@ -392,6 +393,18 @@ Subpath output is raw (unquoted) for shell scripting:
 cat "$(keep config tool)/SKILL.md"    # Read the practice guide
 ls "$(keep config store)"             # List store contents
 ```
+
+Credential-shaped fields are always displayed as `[REDACTED]`, including
+direct paths such as `keep config remote.api_key` and secrets nested inside
+provider parameters. Parent paths such as `keep config remote`, human-readable
+full output, and `--json` output apply the same recursive redaction.
+
+If an installed local model package cannot import because a transitive
+dependency is missing or incompatible, setup reports the original import error
+as `installed but unusable`, and automatic provider detection logs the same
+detail before falling back. The install hint is reserved for packages that are
+actually absent; use `pip check` in the keep environment to diagnose a broken
+dependency stack.
 
 ## Resetting system documents
 

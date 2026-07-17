@@ -10,6 +10,7 @@ These tests do NOT invoke any ML providers or models.
 """
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -165,6 +166,144 @@ class TestGetConfigValue:
         result = _get_config_value(mock_keeper._config, mock_keeper._store_path, "tags")
         assert result == {"project": "testproject"}
 
+    def test_secret_shaped_default_tags_are_redacted(self, mock_keeper):
+        """The tags shortcut cannot bypass recursive config sanitization."""
+        from keep.console_support import _get_config_value
+
+        mock_keeper._config.default_tags = {
+            "project": "testproject",
+            "api_key": "unexpected-secret",
+        }
+
+        result = _get_config_value(
+            mock_keeper._config, mock_keeper._store_path, "tags",
+        )
+
+        assert result == {
+            "project": "testproject",
+            "api_key": "[REDACTED]",
+        }
+
+    def test_remote_config_is_recursively_redacted(self, mock_keeper):
+        """Parent and direct-leaf paths cannot reveal remote credentials."""
+        from keep.config import RemoteConfig
+        from keep.console_support import _get_config_value
+
+        mock_keeper._config.remote = RemoteConfig(
+            api_url="https://api.example.test",
+            api_key="kn_live_secret",
+            project="alpha",
+        )
+
+        parent = _get_config_value(
+            mock_keeper._config, mock_keeper._store_path, "remote",
+        )
+        leaf = _get_config_value(
+            mock_keeper._config, mock_keeper._store_path, "remote.api_key",
+        )
+
+        assert parent == {
+            "api_url": "https://api.example.test",
+            "api_key": "[REDACTED]",
+            "project": "alpha",
+        }
+        assert leaf == "[REDACTED]"
+
+    def test_nested_provider_secrets_are_redacted(self, mock_keeper):
+        """Provider parameter containers are sanitized at every nesting level."""
+        from keep.console_support import _get_config_value
+
+        mock_keeper._config.embedding.params = {
+            "model": "text-embedding-3-small",
+            "api_key": "sk-provider-secret",
+            "transport": {
+                "access_token": "nested-secret",
+                "timeout": 30,
+            },
+        }
+
+        params = _get_config_value(
+            mock_keeper._config, mock_keeper._store_path, "embedding.params",
+        )
+        leaf = _get_config_value(
+            mock_keeper._config,
+            mock_keeper._store_path,
+            "embedding.params.api_key",
+        )
+
+        assert params == {
+            "model": "text-embedding-3-small",
+            "api_key": "[REDACTED]",
+            "transport": {
+                "access_token": "[REDACTED]",
+                "timeout": 30,
+            },
+        }
+        assert leaf == "[REDACTED]"
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "secret_key",
+            "apikey",
+            "apiKey",
+            "aws_secret_access_key",
+            "session_token",
+            "webhook_secret",
+            "signing_key",
+        ],
+    )
+    def test_open_ended_provider_secret_names_are_redacted(
+        self, mock_keeper, field_name,
+    ):
+        """Common provider-specific credential spellings cannot print clear."""
+        from keep.console_support import _get_config_value
+
+        mock_keeper._config.embedding.params = {
+            "model": "safe-model-name",
+            field_name: "credential-value-must-not-print",
+        }
+
+        parent = _get_config_value(
+            mock_keeper._config, mock_keeper._store_path, "embedding.params",
+        )
+        leaf = _get_config_value(
+            mock_keeper._config,
+            mock_keeper._store_path,
+            f"embedding.params.{field_name}",
+        )
+
+        assert parent[field_name] == "[REDACTED]"
+        assert parent["model"] == "safe-model-name"
+        assert leaf == "[REDACTED]"
+
+    @pytest.mark.parametrize(
+        ("field_name", "expected"),
+        [
+            # "token" as its own word is a credential spelling...
+            ("auth_token", True),
+            ("authToken", True),
+            ("github_token", True),
+            # ...but benign token-counting parameters must print in clear.
+            ("max_tokens", False),
+            ("num_tokens", False),
+            ("tokenizer", False),
+        ],
+    )
+    def test_token_matches_whole_words_only(self, mock_keeper, field_name, expected):
+        """Token redaction must not hide benign parameters like max_tokens."""
+        from keep.console_support import _get_config_value
+
+        mock_keeper._config.embedding.params = {field_name: 4096}
+
+        leaf = _get_config_value(
+            mock_keeper._config,
+            mock_keeper._store_path,
+            f"embedding.params.{field_name}",
+        )
+
+        assert leaf == ("[REDACTED]" if expected else 4096)
+
     def test_invalid_path_raises(self, mock_keeper):
         """Invalid path raises BadParameter."""
         import typer
@@ -272,6 +411,53 @@ class TestConfigCommand:
         parsed = json.loads(result.stdout)
         assert "providers" in parsed
         assert isinstance(parsed["providers"], dict)
+
+    def test_config_remote_never_prints_api_key(self, cli, monkeypatch):
+        """Human, leaf, and JSON config paths all redact persisted secrets."""
+        monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+        config_path = Path(os.environ["KEEP_CONFIG"]) / "keep.toml"
+        existing = config_path.read_text(encoding="utf-8")
+        config_path.write_text(
+            existing
+            + "\n[remote]\n"
+            + 'api_url = "https://api.example.test"\n'
+            + 'api_key = "kn_live_cli_secret"\n'
+            + 'project = "alpha"\n'
+            + "\n[tags]\n"
+            + 'api_key = "tag_secret"\n',
+            encoding="utf-8",
+        )
+
+        parent = cli("config", "remote")
+        leaf = cli("config", "remote.api_key")
+        json_parent = cli("--json", "config", "remote")
+        tags = cli("config", "tags")
+        full_human = cli("config")
+        full_json = cli("--json", "config")
+
+        assert parent.returncode == 0
+        assert leaf.returncode == 0
+        assert json_parent.returncode == 0
+        assert tags.returncode == 0
+        assert full_human.returncode == 0
+        assert full_json.returncode == 0
+        for result in (parent, leaf, json_parent, tags, full_human, full_json):
+            assert "kn_live_cli_secret" not in result.stdout
+            assert "kn_live_cli_secret" not in result.stderr
+            assert "tag_secret" not in result.stdout
+            assert "tag_secret" not in result.stderr
+
+        assert "[REDACTED]" in parent.stdout
+        assert "[REDACTED]" in leaf.stdout
+        assert "[REDACTED]" in json_parent.stdout
+        assert "[REDACTED]" in tags.stdout
+        assert "[REDACTED]" in full_human.stdout
+        assert "[REDACTED]" in full_json.stdout
+        assert json.loads(parent.stdout)["api_key"] == "[REDACTED]"
+        assert leaf.stdout.strip() == "[REDACTED]"
+        assert json.loads(json_parent.stdout)["remote"]["api_key"] == "[REDACTED]"
+        assert json.loads(tags.stdout)["api_key"] == "[REDACTED]"
+        assert json.loads(full_json.stdout)["tags"]["api_key"] == "[REDACTED]"
 
 
 # -----------------------------------------------------------------------------
