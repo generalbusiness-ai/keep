@@ -57,7 +57,8 @@ User-facing terminology:
 * If recent work was implementing a written design doc (`later/design/`), ensure that doc reflects the current status.
 * Review all `docs/` for completeness and accuracy.
 * Run `ruff check` (on all files) and fix all issues.
-* Run `cve-lite --verbose` and fix all issues within range.
+* Run `cve-lite --verbose` and fix all issues within range.  Note: in this repo cve-lite only scans the nested npm lockfile (`keep/data/openclaw-plugin/package-lock.json`), not the Python dependencies.
+* Run the Python dependency audit exactly as CI does (see the pip-audit job in `.github/workflows/security.yml`): `uv export --frozen --no-hashes --no-emit-project > /tmp/requirements.txt && pip-audit -r /tmp/requirements.txt` with the workflow's `--ignore-vuln` flags.  Fix findings by bumping the affected dependency floor (see prior "Bump security floor" commits).
 * Check CI for existing alerts.  If found: address them, and re-check by running the CI audit locally.
 * Review all previously-ignored CVEs and other suppressed alerts.
 
@@ -65,5 +66,5 @@ User-facing terminology:
 
 - Test fixtures in `tests/conftest.py` own per-test store isolation and daemon cleanup.
 - If a test leaves a daemon running, that is a test bug and must be fixed.
-- The full suite is `python -m pytest tests/ -x -q` (~1700 tests, ~90s).
+- The full suite is `python -m pytest tests/ -x -q` (~2600 tests, ~3 minutes).
 - If tests don't clean up, or leave daemons running, that is a bug in the tests and must be addressed.
