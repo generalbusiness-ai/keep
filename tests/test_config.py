@@ -6,6 +6,70 @@ from unittest.mock import patch
 import pytest
 
 
+class TestDefaultProviderImportDiagnostics:
+    """Broken optional stacks remain diagnosable during automatic fallback."""
+
+    def test_broken_embedding_stack_logs_original_error(
+        self, monkeypatch, caplog,
+    ) -> None:
+        """A broken sentence-transformers install is not silently discarded."""
+        from keep.config import detect_default_providers
+
+        monkeypatch.setenv("KEEP_LOCAL_ONLY", "1")
+        monkeypatch.setattr("keep.config._detect_ollama", lambda: None)
+        monkeypatch.setattr("keep.config.platform.system", lambda: "Linux")
+        monkeypatch.setattr(
+            "keep.config.probe_optional_dependency",
+            lambda module_name: (
+                "broken",
+                "tokenizers<=0.23.0 is required, found 0.23.1",
+            ) if module_name == "sentence_transformers" else ("missing", None),
+        )
+
+        with caplog.at_level("WARNING", logger="keep.config"):
+            providers = detect_default_providers()
+
+        assert providers["embedding"] is None
+        assert "sentence_transformers is installed but unusable" in caplog.text
+        assert "tokenizers<=0.23.0 is required, found 0.23.1" in caplog.text
+
+    def test_broken_mlx_stacks_log_summarization_media_and_ocr_errors(
+        self, monkeypatch, caplog,
+    ) -> None:
+        """Every Apple-local auto-detection path preserves broken imports."""
+        from keep.config import detect_default_providers
+
+        monkeypatch.setenv("KEEP_LOCAL_ONLY", "1")
+        monkeypatch.setattr("keep.config._detect_ollama", lambda: None)
+        monkeypatch.setattr("keep.config.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("keep.config.platform.machine", lambda: "arm64")
+        monkeypatch.setattr(
+            "keep.config.os.sysconf",
+            lambda name: 4096 if name == "SC_PAGE_SIZE" else 8_388_608,
+        )
+
+        def probe(module_name: str):
+            if module_name == "mlx_lm":
+                return "broken", "mlx-lm dependency conflict"
+            if module_name == "mlx_vlm":
+                return "broken", "mlx-vlm native import failed"
+            return "missing", None
+
+        monkeypatch.setattr("keep.config.probe_optional_dependency", probe)
+
+        with caplog.at_level("WARNING", logger="keep.config"):
+            providers = detect_default_providers()
+
+        assert providers["summarization"].name == "truncate"
+        assert providers["media"] is None
+        assert providers["content_extractor"] is None
+        assert "Cannot auto-configure MLX summarization" in caplog.text
+        assert "mlx-lm dependency conflict" in caplog.text
+        assert "Cannot auto-configure MLX image description" in caplog.text
+        assert "Cannot auto-configure MLX content extraction" in caplog.text
+        assert "mlx-vlm native import failed" in caplog.text
+
+
 class TestOllamaDetection:
     """Tests for Ollama availability and model selection."""
 

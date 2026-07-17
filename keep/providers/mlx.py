@@ -10,6 +10,7 @@ import logging
 import platform
 import sys
 
+from ..optional_dependencies import is_missing_optional_dependency
 from .base import (
     EmbedTask,
     get_registry,
@@ -37,12 +38,23 @@ class MLXEmbedding:
         """
         try:
             import mlx.core as mx  # noqa: PLC0415
+        except ModuleNotFoundError as error:
+            if is_missing_optional_dependency(error, "mlx"):
+                raise RuntimeError(
+                    "MLXEmbedding requires 'mlx'. "
+                    "Install with: pip install mlx"
+                ) from error
+            raise
+
+        try:
             from sentence_transformers import SentenceTransformer  # noqa: PLC0415
-        except ImportError:
-            raise RuntimeError(
-                "MLXEmbedding requires 'mlx' and 'sentence-transformers'. "
-                "Install with: pip install mlx sentence-transformers"
-            )
+        except ModuleNotFoundError as error:
+            if is_missing_optional_dependency(error, "sentence_transformers"):
+                raise RuntimeError(
+                    "MLXEmbedding requires 'sentence-transformers'. "
+                    "Install with: pip install sentence-transformers"
+                ) from error
+            raise
 
         model = require_provider_param(model, provider="MLXEmbedding")
         self.model_name = model

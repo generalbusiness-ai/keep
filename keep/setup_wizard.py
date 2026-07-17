@@ -25,6 +25,7 @@ from .config import (
 )
 from .daemon_client import stop_daemon
 from .integrations import HOOKS_VERSION, TOOL_CONFIGS, detect_new_tools, install_claude_code, install_codex, install_github_copilot, install_kiro, install_openclaw
+from .optional_dependencies import probe_optional_dependency
 
 
 # --- Provider definitions (single source of truth for display names / models) ---
@@ -204,11 +205,12 @@ def detect_embedding_choices(current: Optional[str] = None) -> list[dict[str, An
                 "default": is_default,
             })
 
-    # 3. Local models
+    # 3. Local models. Probe sentence-transformers once because importing its
+    # model stack is comparatively expensive and both local choices require it.
+    st_status, st_error = probe_optional_dependency("sentence_transformers")
     if is_apple_silicon:
-        try:
-            import mlx.core  # noqa
-            import sentence_transformers  # noqa
+        mlx_status, mlx_error = probe_optional_dependency("mlx.core")
+        if mlx_status == "available" and st_status == "available":
             mlx_model = get_default_provider_model("embedding", "mlx") or "all-MiniLM-L6-v2"
             choices.append({
                 "name": f"MLX on Apple Silicon ({mlx_model})",
@@ -217,18 +219,20 @@ def detect_embedding_choices(current: Optional[str] = None) -> list[dict[str, An
                 "hint": "Apple Silicon, local",
                 "default": current == "mlx" if current else False,
             })
-        except ImportError:
+        else:
             mlx_model = get_default_provider_model("embedding", "mlx") or "all-MiniLM-L6-v2"
             choices.append({
                 "name": f"MLX on Apple Silicon ({mlx_model})",
                 "value": None,
                 "available": False,
-                "hint": "requires: uv tool install 'keep-skill[local]'",
+                "hint": _local_dependency_hint(
+                    ("mlx", mlx_status, mlx_error),
+                    ("sentence-transformers", st_status, st_error),
+                ),
                 "default": False,
             })
 
-    try:
-        import sentence_transformers  # noqa
+    if st_status == "available":
         st_model = get_default_provider_model("embedding", "sentence-transformers") or "all-MiniLM-L6-v2"
         choices.append({
             "name": f"sentence-transformers ({st_model})",
@@ -237,17 +241,47 @@ def detect_embedding_choices(current: Optional[str] = None) -> list[dict[str, An
             "hint": "local, no API key",
             "default": current == "sentence-transformers" if current else False,
         })
-    except ImportError:
+    else:
         st_model = get_default_provider_model("embedding", "sentence-transformers") or "all-MiniLM-L6-v2"
         choices.append({
             "name": f"sentence-transformers ({st_model})",
             "value": None,
             "available": False,
-            "hint": "requires: uv tool install 'keep-skill[local]'",
+            "hint": _local_dependency_hint(
+                ("sentence-transformers", st_status, st_error),
+            ),
             "default": False,
         })
 
     return choices
+
+
+def _local_dependency_hint(
+    *dependencies: tuple[str, str, str | None],
+) -> str:
+    """Describe every missing or broken package needed by a local provider.
+
+    A provider can depend on several optional packages.  Reporting only the
+    broken one can hide that another package is genuinely absent, while a
+    generic install hint hides the actionable transitive import error.
+    """
+    missing = [name for name, status, _error in dependencies if status == "missing"]
+    broken = [
+        (name, error)
+        for name, status, error in dependencies
+        if status == "broken"
+    ]
+    details = []
+    if missing:
+        details.append("requires: uv tool install 'keep-skill[local]'")
+    if len(dependencies) == 1 and broken and not missing:
+        details.append(f"installed but unusable: {broken[0][1]}")
+    else:
+        details.extend(
+            f"{name} installed but unusable: {error}"
+            for name, error in broken
+        )
+    return "; ".join(details)
 
 
 def detect_summarization_choices(current: Optional[str] = None) -> list[dict[str, Any]]:
@@ -312,9 +346,9 @@ def detect_summarization_choices(current: Optional[str] = None) -> list[dict[str
 
     # 3. Local MLX
     if is_apple_silicon:
-        try:
-            import mlx_lm  # noqa
-            mlx_model = get_default_provider_model("summarization", "mlx") or "mlx-community/Llama-3.2-3B-Instruct-4bit"
+        mlx_status, mlx_error = probe_optional_dependency("mlx_lm")
+        mlx_model = get_default_provider_model("summarization", "mlx") or "mlx-community/Llama-3.2-3B-Instruct-4bit"
+        if mlx_status == "available":
             choices.append({
                 "name": f"MLX on Apple Silicon ({mlx_model})",
                 "value": ("mlx", {"model": mlx_model}),
@@ -322,13 +356,14 @@ def detect_summarization_choices(current: Optional[str] = None) -> list[dict[str
                 "hint": "Apple Silicon, local",
                 "default": current == "mlx" if current else False,
             })
-        except ImportError:
-            mlx_model = get_default_provider_model("summarization", "mlx") or "mlx-community/Llama-3.2-3B-Instruct-4bit"
+        else:
             choices.append({
                 "name": f"MLX on Apple Silicon ({mlx_model})",
                 "value": None,
                 "available": False,
-                "hint": "requires: uv tool install 'keep-skill[local]'",
+                "hint": _local_dependency_hint(
+                    ("mlx-lm", mlx_status, mlx_error),
+                ),
                 "default": False,
             })
 

@@ -55,6 +55,76 @@ class TestDetectToolChoices:
 
 class TestDetectEmbeddingChoices:
     """Tests for embedding choice detection."""
+
+    def test_broken_local_stack_surfaces_original_import_error(self, monkeypatch):
+        """Installed-but-broken local packages are not reported as missing."""
+        monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
+        monkeypatch.setattr("keep.setup_wizard.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("keep.setup_wizard.platform.machine", lambda: "arm64")
+
+        def probe(module_name: str):
+            if module_name == "sentence_transformers":
+                return "broken", "tokenizers<=0.23.0 is required, found 0.23.1"
+            return "available", None
+
+        monkeypatch.setattr("keep.setup_wizard.probe_optional_dependency", probe)
+
+        choices = detect_embedding_choices()
+        local_choices = [
+            choice for choice in choices
+            if choice["name"].startswith(("MLX", "sentence-transformers"))
+        ]
+
+        assert len(local_choices) == 2
+        assert all(choice["available"] is False for choice in local_choices)
+        assert all(
+            "installed but unusable" in choice["hint"]
+            and "tokenizers<=0.23.0" in choice["hint"]
+            for choice in local_choices
+        )
+
+    def test_missing_local_stack_keeps_install_guidance(self, monkeypatch):
+        """A genuinely absent package retains the local-extra instruction."""
+        monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
+        monkeypatch.setattr("keep.setup_wizard.platform.system", lambda: "Linux")
+        monkeypatch.setattr(
+            "keep.setup_wizard.probe_optional_dependency",
+            lambda _module_name: ("missing", None),
+        )
+
+        choices = detect_embedding_choices()
+        sentence_transformers = next(
+            choice for choice in choices
+            if choice["name"].startswith("sentence-transformers")
+        )
+
+        assert sentence_transformers["available"] is False
+        assert sentence_transformers["hint"] == (
+            "requires: uv tool install 'keep-skill[local]'"
+        )
+
+    def test_mlx_hint_reports_missing_and_broken_dependencies(self, monkeypatch):
+        """A mixed failure must not hide either required repair action."""
+        monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
+        monkeypatch.setattr("keep.setup_wizard.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("keep.setup_wizard.platform.machine", lambda: "arm64")
+
+        def probe(module_name: str):
+            if module_name == "mlx.core":
+                return "missing", None
+            return "broken", "tokenizers is incompatible"
+
+        monkeypatch.setattr("keep.setup_wizard.probe_optional_dependency", probe)
+
+        choices = detect_embedding_choices()
+        mlx = next(choice for choice in choices if choice["name"].startswith("MLX"))
+
+        assert "requires: uv tool install 'keep-skill[local]'" in mlx["hint"]
+        assert (
+            "sentence-transformers installed but unusable: "
+            "tokenizers is incompatible"
+        ) in mlx["hint"]
+
     def test_ollama_available(self, monkeypatch):
         monkeypatch.setattr(
             "keep.setup_wizard._detect_ollama",
@@ -151,6 +221,45 @@ class TestDetectEmbeddingChoices:
 
 class TestDetectSummarizationChoices:
     """Tests for summarization choice detection."""
+
+    def test_broken_mlx_stack_surfaces_original_import_error(self, monkeypatch):
+        """A transitive MLX failure is reported as broken, not uninstalled."""
+        monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
+        monkeypatch.setattr("keep.setup_wizard.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("keep.setup_wizard.platform.machine", lambda: "arm64")
+        monkeypatch.setattr(
+            "keep.setup_wizard.probe_optional_dependency",
+            lambda module_name: (
+                "broken",
+                "tokenizers<=0.23.0 is required, found 0.23.1",
+            ) if module_name == "mlx_lm" else ("missing", None),
+        )
+
+        choices = detect_summarization_choices()
+        mlx = next(choice for choice in choices if choice["name"].startswith("MLX"))
+
+        assert mlx["available"] is False
+        assert mlx["hint"] == (
+            "installed but unusable: "
+            "tokenizers<=0.23.0 is required, found 0.23.1"
+        )
+
+    def test_missing_mlx_stack_keeps_install_guidance(self, monkeypatch):
+        """A genuinely absent mlx-lm package retains the local-extra hint."""
+        monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
+        monkeypatch.setattr("keep.setup_wizard.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("keep.setup_wizard.platform.machine", lambda: "arm64")
+        monkeypatch.setattr(
+            "keep.setup_wizard.probe_optional_dependency",
+            lambda _module_name: ("missing", None),
+        )
+
+        choices = detect_summarization_choices()
+        mlx = next(choice for choice in choices if choice["name"].startswith("MLX"))
+
+        assert mlx["available"] is False
+        assert mlx["hint"] == "requires: uv tool install 'keep-skill[local]'"
+
     def test_always_has_truncate_fallback(self, monkeypatch):
         monkeypatch.setattr("keep.setup_wizard._detect_ollama", lambda: None)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

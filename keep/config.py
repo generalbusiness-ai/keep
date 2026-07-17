@@ -6,6 +6,7 @@ It specifies which providers to use and their parameters.
 
 import importlib.resources
 import json
+import logging
 import os
 import platform
 import tomllib
@@ -20,11 +21,31 @@ from typing import Any, Callable, Optional
 import tomli_w
 import yaml
 
+from .optional_dependencies import probe_optional_dependency
+
 
 CONFIG_FILENAME = "keep.toml"
 CONFIG_VERSION = 3  # Bumped for document versioning support
 SYSTEM_DOCS_VERSION = 20  # Legacy — kept for backward-compat reading of old configs
 DEFAULT_PROVIDER_MODELS_FILENAME = "default-provider-models.yaml"
+
+logger = logging.getLogger(__name__)
+
+
+def _local_dependency_available(module_name: str, capability: str) -> bool:
+    """Probe an optional local stack and warn only when an install is broken."""
+    status, error = probe_optional_dependency(module_name)
+    if status == "broken":
+        # Missing optional packages are normal during auto-detection.  An import
+        # failure inside an installed stack is not: retain its version/module
+        # detail so silent fallback does not erase the actual repair path.
+        logger.warning(
+            "Cannot auto-configure %s: %s is installed but unusable: %s",
+            capability,
+            module_name,
+            error,
+        )
+    return status == "available"
 
 
 def get_tool_directory() -> Path:
@@ -517,11 +538,8 @@ def _detect_content_extractor() -> "ProviderConfig | None":
 
     # 3. MLX (Apple Silicon with mlx-vlm)
     if platform.system() == "Darwin" and platform.machine() == "arm64":
-        try:
-            import mlx_vlm  # noqa
+        if _local_dependency_available("mlx_vlm", "MLX content extraction"):
             return make_default_provider_config("content_extractor", "mlx")
-        except ImportError:
-            pass
 
     return None
 
@@ -624,20 +642,18 @@ def detect_default_providers() -> dict[str, ProviderConfig | None]:
 
     # 3. Local providers (MLX, sentence-transformers)
     if embedding_provider is None:
+        sentence_transformers_available = _local_dependency_available(
+            "sentence_transformers", "sentence-transformers embeddings",
+        )
         if is_apple_silicon:
-            try:
-                import mlx.core  # noqa
-                import sentence_transformers  # noqa  — MLX embedding uses sentence-transformers
+            mlx_available = _local_dependency_available(
+                "mlx.core", "MLX embeddings",
+            )
+            if mlx_available and sentence_transformers_available:
                 embedding_provider = make_default_provider_config("embedding", "mlx")
-            except ImportError:
-                pass
 
-        if embedding_provider is None:
-            try:
-                import sentence_transformers  # noqa
-                embedding_provider = make_default_provider_config("embedding", "sentence-transformers")
-            except ImportError:
-                pass
+        if embedding_provider is None and sentence_transformers_available:
+            embedding_provider = make_default_provider_config("embedding", "sentence-transformers")
 
     # May be None - CLI will show helpful error
     providers["embedding"] = embedding_provider
@@ -671,11 +687,8 @@ def detect_default_providers() -> dict[str, ProviderConfig | None]:
 
     # 3. Local MLX (Apple Silicon)
     if summarization_provider is None and is_apple_silicon:
-        try:
-            import mlx_lm  # noqa
+        if _local_dependency_available("mlx_lm", "MLX summarization"):
             summarization_provider = make_default_provider_config("summarization", "mlx")
-        except ImportError:
-            pass
 
     # 4. Fallback: truncate (always available)
     if summarization_provider is None:
@@ -700,18 +713,13 @@ def detect_default_providers() -> dict[str, ProviderConfig | None]:
 
     # 2. MLX (Apple Silicon with mlx-vlm or mlx-whisper)
     if media_provider is None and is_apple_silicon:
-        _has_media_mlx = False
-        try:
-            import mlx_vlm  # noqa
-            _has_media_mlx = True
-        except ImportError:
-            pass
+        _has_media_mlx = _local_dependency_available(
+            "mlx_vlm", "MLX image description",
+        )
         if not _has_media_mlx:
-            try:
-                import mlx_whisper  # noqa
-                _has_media_mlx = True
-            except ImportError:
-                pass
+            _has_media_mlx = _local_dependency_available(
+                "mlx_whisper", "MLX audio transcription",
+            )
         if _has_media_mlx:
             media_provider = make_default_provider_config("media", "mlx")
 

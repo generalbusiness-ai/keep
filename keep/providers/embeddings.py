@@ -7,6 +7,7 @@ import time
 
 import httpx
 
+from ..optional_dependencies import is_missing_optional_dependency
 from .base import EmbedTask, get_registry, require_provider_param
 from .openai_client import create_openai_client
 
@@ -29,11 +30,15 @@ class SentenceTransformerEmbedding:
         """
         try:
             from sentence_transformers import SentenceTransformer  # noqa: PLC0415
-        except ImportError:
-            raise RuntimeError(
-                "SentenceTransformerEmbedding requires 'sentence-transformers' library. "
-                "Install with: pip install sentence-transformers"
-            )
+        except ModuleNotFoundError as error:
+            if is_missing_optional_dependency(error, "sentence_transformers"):
+                raise RuntimeError(
+                    "SentenceTransformerEmbedding requires 'sentence-transformers' library. "
+                    "Install with: pip install sentence-transformers"
+                ) from error
+            # The package is present but one of its imports failed.  Preserve
+            # that actionable dependency/version error for the provider factory.
+            raise
 
         model = require_provider_param(model, provider="SentenceTransformerEmbedding")
         self.model_name = model
