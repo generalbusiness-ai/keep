@@ -110,10 +110,10 @@ local = [
     "mlx>=0.10; platform_system == 'Darwin' and platform_machine == 'arm64'",
     "mlx-lm>=0.10; platform_system == 'Darwin' and platform_machine == 'arm64'",
     "sentence-transformers>=2.2",
-    # transformers 5.9.0 caps tokenizers<=0.23.0 but pip resolves 0.23.1,
+    # transformers 5.9.0 caps tokenizers<=0.23.1 but pip resolves 0.23.1,
     # breaking `import sentence_transformers` on fresh installs (issue #13).
     # Remove once transformers relaxes its tokenizers cap.
-    "tokenizers<=0.23.0",
+    "tokenizers<=0.23.1",
 ]
 # Media description (Apple Silicon vision + audio models)
 media = [
