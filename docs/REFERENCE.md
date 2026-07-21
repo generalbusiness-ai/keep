@@ -21,7 +21,7 @@
 | `keep edit` | Edit content in $EDITOR | — |
 | `keep del` | Remove note or revert to previous version | — |
 | `keep tag` | Add, update, or remove tags | [TAGGING.md](TAGGING.md) |
-| `keep flow` | Run or inspect a state-machine flow | — |
+| `keep flow` | Run a state-doc flow synchronously | [KEEP-FLOW.md](KEEP-FLOW.md) |
 | `keep data export` | Export store to JSON (default) or markdown directory (`--format md`) | [KEEP-DATA.md](KEEP-DATA.md) |
 | `keep data import` | Import documents from JSON export file | [KEEP-DATA.md](KEEP-DATA.md) |
 | `keep daemon` | Run or manage the background daemon and its work queues | [KEEP-DAEMON.md](KEEP-DAEMON.md) |
@@ -135,11 +135,11 @@ keep analyze ID --fg                 # Wait for completion
 keep analyze ID --force              # Re-analyze even if current
 
 # Flow
-keep flow                            # Show current flow state
-keep flow "state" -t target          # Transition to state
+keep flow "state" -t target          # Run a state doc for a target note
+keep flow get -p item_id=now         # Pass named parameters
+keep flow get -p item_id=now --token-budget 2000  # Limit rendered output
 keep flow -f file.yaml               # Load flow from file
 keep flow -b 10 -c cursor            # Budget and cursor control
-keep flow -p key=value               # Pass parameters
 
 # Data management
 keep data export backup.json         # Export store to JSON

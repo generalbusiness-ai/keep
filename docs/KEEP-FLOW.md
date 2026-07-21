@@ -198,11 +198,16 @@ keep flow --cursor <token> [options]  # resume a stopped flow
 |------|-------|-------------|
 | `--target ID` | `-t` | Target note ID (sets `params.id`) |
 | `--budget N` | `-b` | Max ticks this invocation (default: from config) |
+| `--token-budget N` | `--tokens` | Render agent-readable output within N tokens |
 | `--cursor TOKEN` | `-c` | Resume a stopped flow from its cursor |
 | `--file PATH` | `-f` | Load state doc from file, or `-` for stdin |
 | `--param key=value` | `-p` | Set a flow parameter (repeatable) |
 
-Output is a JSON object:
+By default, the CLI emits the raw JSON response described below. Pass
+`--token-budget N` for the same
+token-budgeted text rendering available through MCP. `--budget` is separate:
+it limits flow execution ticks, not response length. `--json` preserves the
+raw response envelope when used with `--token-budget`.
 
 | Field | Present | Description |
 |-------|---------|-------------|

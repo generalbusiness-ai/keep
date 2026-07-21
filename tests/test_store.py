@@ -5,7 +5,9 @@ These tests use a temporary directory for each test to ensure isolation.
 
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 # Skip all tests if chromadb not installed
@@ -176,6 +178,21 @@ class TestEmbeddingQueries:
         item = results[0].to_item()
         assert item.score is not None
         assert item.score > 0.9  # Should be very similar (nearly 1.0)
+
+    def test_query_embedding_accepts_numpy_distance_arrays(self, store, monkeypatch):
+        """Distance arrays from Chroma providers must not use ambiguous truthiness."""
+        collection = MagicMock()
+        collection.query.return_value = {
+            "ids": [["doc:1", "doc:2"]],
+            "documents": [["First", "Second"]],
+            "metadatas": [[{}, {}]],
+            "distances": np.array([[0.1, 0.2]]),
+        }
+        monkeypatch.setattr(store, "_get_collection", lambda _collection: collection)
+
+        results = store.query_embedding("test", [1.0, 0.0, 0.0, 0.0], limit=2)
+
+        assert [result.distance for result in results] == [0.1, 0.2]
 
 
 # -----------------------------------------------------------------------------

@@ -9,10 +9,12 @@ from unittest.mock import MagicMock, patch
 
 from click.exceptions import Exit
 import pytest
+from typer.testing import CliRunner
 
 from keep.api import Keeper
 from keep.daemon_server import DaemonServer
 from keep.cli_app import (
+    app,
     _post,
     _render_context,
     _render_find,
@@ -506,6 +508,32 @@ def test_put_id_now_file_keeps_put_semantics(tmp_path):
     assert body["uri"] == f"file://{note.resolve()}"
     mock_get.assert_not_called()
     mock_echo.assert_called_once_with("now stored.")
+
+
+def test_flow_token_budget_renders_when_backend_returns_only_raw_data():
+    """Older hosted backends still get the CLI's token-budgeted text surface."""
+    response = {
+        "status": "done",
+        "bindings": {},
+        "data": {"message": "hello from the flow"},
+        "ticks": 1,
+        "history": ["test-flow"],
+        "cursor": None,
+        "tried_queries": [],
+    }
+    with (
+        patch("keep.cli_app._get_port", return_value=-1),
+        patch("keep.cli_app._post", return_value=response) as mock_post,
+    ):
+        result = CliRunner().invoke(
+            app,
+            ["flow", "test-flow", "--token-budget", "100"],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "flow: done (1 ticks) via test-flow\nmessage: hello from the flow\n"
+    assert mock_post.call_args.args[2]["token_budget"] == 100
 
 
 # ---------------------------------------------------------------------------

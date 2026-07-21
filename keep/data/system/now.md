@@ -19,27 +19,27 @@ List the full library, and read the library index:
 ```
 keep_flow(state="list", params={prefix: ".library", include_hidden: true})
 
-keep_flow(state="get", params={id: ".library"}, token_budget=2000)
+keep_flow(state="get", params={item_id: ".library"}, token_budget=2000)
 ```
 
 The Ancrene Riwle - "schir heorte":
 ```
-keep_flow(state="get", params={id: ".library/ancrenewisse"}, token_budget=2000)
+keep_flow(state="get", params={item_id: ".library/ancrenewisse"}, token_budget=2000)
 ```
 
 The Exhortation to Rāhula at Mango Stone (MN 61) — "actions are to be done with repeated reflection":
 ```
-keep_flow(state="get", params={id: ".library/mn61"}, token_budget=2000)
+keep_flow(state="get", params={item_id: ".library/mn61"}, token_budget=2000)
 ```
 
 Subjects for Regular Reviewing (AN 5.57) — "I am the owner of my deeds and heir to my deeds":
 ```
-keep_flow(state="get", params={id: ".library/an5-57"}, token_budget=2000)
+keep_flow(state="get", params={item_id: ".library/an5-57"}, token_budget=2000)
 ```
 
 The han verse — "時不待人":
 ```
-keep_flow(state="get", params={id: ".library/han-verse"}, token_budget=2000)
+keep_flow(state="get", params={item_id: ".library/han-verse"}, token_budget=2000)
 ```
 
 Each teaching has a `source_url` tag pointing to the full original text. To ingest any original, link it back to the library summary with a `duplicates` edge:

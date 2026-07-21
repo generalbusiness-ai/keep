@@ -23,7 +23,7 @@ Public domain texts for bootstrapping reflective memory. The content is relevant
 
 To read any teaching:
 ```
-keep_flow(state="get", params={id: ".library/mn61"}, token_budget=2000)
+keep_flow(state="get", params={item_id: ".library/mn61"}, token_budget=2000)
 ```
 
 Each teaching has a `source_url` tag pointing to the full original text online. To ingest the full original into your store, link it back to the library summary with a `duplicates` edge:

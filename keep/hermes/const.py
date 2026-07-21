@@ -70,7 +70,7 @@ FLOW_SCHEMA = {
         "Only use state_doc_yaml for advanced custom flows.\n"
         "Examples:\n"
         '  Search: state="query-resolve", params={"query": "auth patterns"}\n'
-        '  Get context: state="get", params={"id": "now"}\n'
+        '  Get context: state="get", params={"item_id": "now"}\n'
         '  Store text: state="put", params={"content": "decision: use JWT", '
         '"tags": {"project": "auth"}}\n'
         '  Store URL: state="put", params={"uri": "https://example.com/article"}\n'

@@ -47,13 +47,13 @@ keep_flow(state="tag", params={id: "item", tags: {reviewed: "true"}})           
 keep_help(topic="flow-actions")                                                            # Action reference
 ```
 
-**No MCP?** Every flow has a CLI equivalent: `keep flow get -p item_id=now`, `keep flow query-resolve -p query=X`, `keep flow put -p content=X`. Use Bash to run them.
+**No MCP?** Every flow has a CLI equivalent: `keep flow get -p item_id=now --token-budget 2000`, `keep flow query-resolve -p query=X --token-budget 2000`, `keep flow put -p content=X`. CLI `--budget` limits execution ticks; `--token-budget` limits rendered response text. Use Bash to run them.
 
 **Protocol:** Reflect using `keep` tools — before, during, and after action. Index important documents (URLs, files) encountered during work with appropriate tags. When writing a plan, incorporate this practice into the plan itself. If the practice is unclear, use `keep_help(topic="index")`.
 """
 
 # Bump this when hook definitions change — triggers re-install for existing users
-HOOKS_VERSION = 14
+HOOKS_VERSION = 15
 
 # Claude Code plugin marketplace URL
 CLAUDE_CODE_MARKETPLACE_URL = "https://github.com/generalbusiness-ai/keep.git"

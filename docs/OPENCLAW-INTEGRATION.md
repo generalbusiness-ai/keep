@@ -99,7 +99,7 @@ The agent also has voluntary access to keep via MCP tools:
 ```
 keep_flow(state="get", params={item_id: "now"})          # Current intentions
 keep_flow(state="query-resolve", params={query: "topic"})        # Semantic search
-keep_flow(state="put", params={content: "insight", tags: {type: "learning"}})  # Capture
+keep_flow(state="put", params={content: "insight", tags: {kind: "learning"}})  # Capture
 keep_prompt(name="reflect")                                       # Full reflection
 keep_help(topic="flow-actions")                                   # Documentation
 ```

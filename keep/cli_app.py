@@ -65,6 +65,7 @@ from .markdown_mirrors import run_markdown_export_once
 from .paths import get_config_dir, get_default_store_path
 from .remote import RemoteKeeper, resolve_remote_config
 from .setup_wizard import run_wizard
+from .state_doc_runtime import FlowResult
 from .utils import _list_directory_files
 from .workstream import derive_workstream_slug
 
@@ -2293,6 +2294,9 @@ def flow_cmd(
     target: Annotated[Optional[str], typer.Option("--target", "-t", help="Target note ID")] = None,
     file: Annotated[Optional[str], typer.Option("--file", "-f", help="YAML state doc file or '-' for stdin")] = None,
     budget: Annotated[Optional[int], typer.Option("--budget", "-b", help="Max ticks")] = None,
+    token_budget: Annotated[Optional[int], typer.Option(
+        "--token-budget", "--tokens", min=1, help="Token budget for rendered output",
+    )] = None,
     cursor: Annotated[Optional[str], typer.Option("--cursor", "-c", help="Resume cursor")] = None,
     param: Annotated[Optional[list[str]], typer.Option("--param", "-p", help="Parameter as key=value")] = None,
     json_output: JsonFlag = False,
@@ -2303,6 +2307,7 @@ def flow_cmd(
     Examples:
         keep flow after-write --target %abc123
         keep flow query-resolve -p query="auth patterns"
+        keep flow get -p item_id=now --token-budget 2000
         keep flow --file review.yaml --target myproject
         keep flow --cursor <token> --budget 5
     """
@@ -2343,12 +2348,39 @@ def flow_cmd(
     body: dict = {"state": state, "params": flow_params}
     if budget is not None:
         body["budget"] = budget
+    if token_budget is not None:
+        body["token_budget"] = token_budget
     if cursor:
         body["cursor_token"] = cursor
     if state_doc_yaml:
         body["state_doc_yaml"] = state_doc_yaml
 
     data = _post(port, "/v1/flow", body)
+    # The daemon keeps raw flow data in the response even when it also renders
+    # agent-readable text. Hosted deployments can lag this response extension,
+    # so reconstruct the public FlowResult and render client-side as a fallback.
+    # Preserve the full machine-readable envelope when --json is explicit.
+    if token_budget is not None and not _is_json(json_output):
+        rendered = data.get("rendered")
+        if not rendered:
+            result = FlowResult(
+                status=str(data.get("status", "error")),
+                bindings=data.get("bindings") if isinstance(data.get("bindings"), dict) else {},
+                data=data.get("data") if isinstance(data.get("data"), dict) else None,
+                ticks=data.get("ticks") if isinstance(data.get("ticks"), int) else 0,
+                history=data.get("history") if isinstance(data.get("history"), list) else [],
+                cursor=data.get("cursor") if isinstance(data.get("cursor"), str) else None,
+                tried_queries=(
+                    data.get("tried_queries")
+                    if isinstance(data.get("tried_queries"), list)
+                    else []
+                ),
+            )
+            rendered = _console_support.render_flow_response(
+                result, token_budget=token_budget,
+            )
+        typer.echo(rendered)
+        return
     if _is_json(json_output):
         typer.echo(json.dumps(data, ensure_ascii=False))
     else:

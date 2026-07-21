@@ -26,7 +26,10 @@
     "clean": "rm -rf dist"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "esbuild": "^0.25.0"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11"
   }
 }

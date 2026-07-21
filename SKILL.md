@@ -42,13 +42,13 @@ keep_prompt(name="reflect")                                                     
 keep_flow(state="get", params={item_id: "now"}, token_budget=2000)                        # Current intentions
 keep_flow(state="query-resolve", params={query: "topic"}, token_budget=2000)              # What do I know?
 keep_flow(state="put", params={content: "what's true now", id: "now"})                    # Update intentions
-keep_flow(state="put", params={content: "learning", tags: {type: "learning"}})            # Capture insight
+keep_flow(state="put", params={content: "learning", tags: {kind: "learning"}})            # Capture insight
 keep_flow(state="put", params={uri: "https://example.com/doc", tags: {topic: "X"}})       # Index a document
 keep_flow(state="tag", params={id: "item", tags: {reviewed: "true"}})                     # Tag an item
 keep_help(topic="flow-actions")                                                            # Action reference
 \`\`\`
 
-**No MCP?** Every flow has a CLI equivalent: `keep flow get -p item_id=now`, `keep flow query-resolve -p query=X`, `keep flow put -p content=X`. Use Bash to run them.
+**No MCP?** Every flow has a CLI equivalent: `keep flow get -p item_id=now --token-budget 2000`, `keep flow query-resolve -p query=X --token-budget 2000`, `keep flow put -p content=X`. CLI `--budget` limits execution ticks; `--token-budget` limits rendered response text. Use Bash to run them.
 
 **Protocol:** Reflect using `keep` tools — before, during, and after action. Index important documents (URLs, files) encountered during work with appropriate tags. When writing a plan, incorporate this practice into the plan itself. If the practice is unclear, use `keep_help(topic="index")`.
 
@@ -109,21 +109,21 @@ Between reflections, use `keep_flow` to maintain awareness:
 ```
 keep_flow(state="get", params={item_id: "now"}, token_budget=2000)           # Current intentions
 keep_flow(state="query-resolve", params={query: "this situation"}, token_budget=2000) # What do I already know?
-keep_flow(state="put", params={content: "what happened", tags: {type: "learning"}})  # Capture insight
-keep_flow(state="put", params={content: "Assumed X, actually Y", tags: {type: "breakdown"}})  # Index breakdowns
+keep_flow(state="put", params={content: "what happened", tags: {kind: "learning"}})  # Capture insight
+keep_flow(state="put", params={content: "Assumed X, actually Y", tags: {kind: "breakdown"}})  # Index breakdowns
 ```
 
 **Index important documents.** Whenever you encounter documents (URLs, files, references) important to the user or task, index them:
 ```
 keep_flow(state="put", params={uri: "https://example.com/doc", tags: {topic: "auth", project: "myapp"}})
-keep_flow(state="put", params={uri: "file:///path/to/important.pdf", tags: {type: "reference", topic: "security"}})
+keep_flow(state="put", params={uri: "file:///path/to/important.pdf", tags: {kind: "reference", topic: "security"}})
 ```
 Ask: What is this document? Why is it important? Tag appropriately. Documents indexed during work become navigable knowledge.
 
 **Link sources to outcomes.** When a document informs a decision or learning, connect them with `informs`/`informed_by`:
 ```
 keep_flow(state="put", params={uri: "https://example.com/doc", tags: {topic: "auth", informs: "auth-decision"}})
-keep_flow(state="put", params={content: "We chose OAuth2 because...", tags: {type: "learning", informed_by: "https://example.com/doc"}})
+keep_flow(state="put", params={content: "We chose OAuth2 because...", tags: {kind: "learning", informed_by: "https://example.com/doc"}})
 ```
 This makes provenance navigable — `get` on a note shows what informed it, and vice versa.
 
@@ -186,12 +186,12 @@ keep_flow(state="get", params={item_id: ".library/han-verse"}, token_budget=2000
 
 Each library teaching has a `source_url` tag pointing at the full original. To ingest the complete original text and link it back to the library summary:
 ```
-keep_flow(state="put", params={uri: "<source_url>", tags: {type: "teaching", duplicates: ".library/<id>"}})
+keep_flow(state="put", params={uri: "<source_url>", tags: {kind: "teaching", duplicates: ".library/<id>"}})
 ```
 
 **Now reflect:** What did you learn? Save your understanding:
 ```
-keep_flow(state="put", params={content: "My understanding of the practice: ...", tags: {type: "learning"}})
+keep_flow(state="put", params={content: "My understanding of the practice: ...", tags: {kind: "learning"}})
 ```
 
 For installation options, see [docs/QUICKSTART.md](docs/QUICKSTART.md).
@@ -214,7 +214,7 @@ keep_flow(state="query-resolve", params={query: "recent", since: "P1D", bias: {n
 keep_flow(state="find-deep", params={query: "auth patterns"}, token_budget=2000)  # With edge traversal
 
 # Write
-keep_flow(state="put", params={content: "insight", tags: {type: "learning"}})
+keep_flow(state="put", params={content: "insight", tags: {kind: "learning"}})
 keep_flow(state="put", params={content: "Working on auth flow", id: "now"})       # Update intentions
 keep_flow(state="put", params={content: "I'll fix auth", tags: {act: "commitment", status: "open"}})
 

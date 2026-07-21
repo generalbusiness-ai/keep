@@ -37,7 +37,7 @@ wrong rather than deferring it.
    ```bash
    python -m pytest tests/ -x -q
    ```
-   ~1700 tests, ~90 seconds. The full suite must pass — no skipped failures,
+   ~2600 tests, ~3 minutes. The full suite must pass — no skipped failures,
    no leaked daemons. If a test leaves a daemon running, that is a test bug
    and must be fixed before release.
 

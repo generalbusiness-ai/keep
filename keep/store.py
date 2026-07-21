@@ -808,12 +808,17 @@ class ChromaStore:
                 result = coll.query(**query_params)
 
                 results = []
+                # Chroma normally returns nested lists, but some embedding/store
+                # combinations return NumPy arrays.  Do not use array truthiness:
+                # it raises when a query has more than one result.
+                distances = result.get("distances")
+                has_distances = distances is not None and len(distances) > 0
                 for i, id in enumerate(result["ids"][0]):
                     results.append(StoreResult(
                         id=id,
                         summary=result["documents"][0][i] or "",
                         tags=self._metadata_to_tags(result["metadatas"][0][i]),
-                        distance=result["distances"][0][i] if result["distances"] else None,
+                        distance=distances[0][i] if has_distances else None,
                     ))
 
                 span.set_attribute("result_count", len(results))

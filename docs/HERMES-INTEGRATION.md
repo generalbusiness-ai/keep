@@ -40,7 +40,7 @@ Three tools are available: `keep_flow` (all operations), `keep_help` (documentat
 For `keep_flow`, the normal form is always `state + params`:
 
 ```text
-keep_flow(state="get", params={"id": "now"})
+keep_flow(state="get", params={"item_id": "now"})
 keep_flow(state="list", params={"prefix": ".library", "include_hidden": true})
 keep_flow(state="put", params={"id": "now", "content": "updated intentions"})
 ```

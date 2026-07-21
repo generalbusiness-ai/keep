@@ -32,6 +32,10 @@ dependencies = [
     "openai>=1.0",
     "anthropic>=0.40.0",
     "google-genai>=1.0.0",
+    # Security floor: CVE-2026-59885/59886 (quadratic OID processing and
+    # unbounded REAL exponent conversion) fixed in 0.6.4. Pulled in
+    # transitively through google-auth/rsa.
+    "pyasn1>=0.6.4",
     # Mistral providers (embeddings, chat, OCR) use the REST API directly via httpx
     # — no mistralai SDK dependency.
     # Document extraction

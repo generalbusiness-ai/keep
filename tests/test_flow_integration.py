@@ -938,6 +938,29 @@ rules:
         assert output["ticks"] == 2
         assert "cursor" in output
 
+    def test_flow_with_token_budget_renders_text(self, cli):
+        """--token-budget controls rendering, independently of tick budget."""
+        result = cli(
+            "flow", "get", "-p", "item_id=.library/mn61",
+            "--token-budget", "200",
+        )
+
+        assert result.exit_code == 0
+        assert "id: .library/mn61" in result.stdout
+        assert not result.stdout.lstrip().startswith("{")
+
+    def test_flow_tokens_alias_with_json_preserves_envelope(self, cli):
+        """--json remains machine-readable when rendered output is requested."""
+        result = cli(
+            "flow", "get", "-p", "item_id=.library/mn61",
+            "--tokens", "200", "--json",
+        )
+
+        assert result.exit_code == 0
+        output = json.loads(result.stdout)
+        assert output["status"] == "done"
+        assert "rendered" in output
+
 
 # ---------------------------------------------------------------------------
 # API: run_flow_command

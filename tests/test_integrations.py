@@ -6,11 +6,19 @@ from unittest.mock import patch
 
 from keep.config import StoreConfig, create_default_config, save_config
 from keep.integrations import (
+    PROTOCOL_BLOCK,
     PROTOCOL_BLOCK_MARKER,
     check_and_install,
     install_codex,
     install_github_copilot,
 )
+
+
+def test_claude_plugin_skill_contains_canonical_protocol_block():
+    """The separately packaged Claude skill must not drift from installed guidance."""
+    plugin_skill = Path(__file__).parent.parent / "claude-code-plugin" / "skills" / "keep" / "SKILL.md"
+
+    assert PROTOCOL_BLOCK.strip() in plugin_skill.read_text(encoding="utf-8")
 
 
 def test_install_codex_writes_global_codex_agents_file(tmp_path, monkeypatch):
