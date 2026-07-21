@@ -1195,7 +1195,7 @@ wheels = [
 
 [[package]]
 name = "keep-skill"
-version = "0.161.1"
+version = "0.162.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
