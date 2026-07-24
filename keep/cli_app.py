@@ -2398,7 +2398,7 @@ def edit_cmd(
     if the content changed.
     Examples:
         keep edit .ignore                    # Edit ignore patterns
-        keep edit .prompt/agent/reflect      # Edit a prompt template
+        keep edit .prompt/agent/reflect      # Edit a prompt (hosted: admin key required)
         keep edit now                        # Edit current intentions
     """
     port = _get_port()

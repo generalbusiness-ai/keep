@@ -100,6 +100,10 @@ keep list .prompt                        # All prompt docs
 
 Prompt docs are editable and versioned like any other store document.
 
+In hosted mode, `.prompt/*` notes are protected system notes. Editing them
+requires an API key with the `admin` permission; a read/write key can render and
+view prompts but cannot save changes to them.
+
 ## See Also
 
 - [KEEP-PROMPT.md](KEEP-PROMPT.md) — Agent prompt CLI and template placeholders

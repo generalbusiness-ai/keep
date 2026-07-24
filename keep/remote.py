@@ -247,11 +247,20 @@ class RemoteKeeper:
             return ""
         if not isinstance(data, dict):
             return ""
+        # The local daemon uses ``error`` while FastAPI's default
+        # ``HTTPException`` envelope uses ``detail``.  Remote callers need the
+        # server's actionable explanation in either case; otherwise a hosted
+        # permission failure degrades to an opaque ``403 Forbidden``.
         error = data.get("error")
+        if error is None:
+            error = data.get("detail")
         request_id = data.get("request_id")
         parts: list[str] = []
         if error:
-            parts.append(str(error))
+            if isinstance(error, (dict, list)):
+                parts.append(json.dumps(error, ensure_ascii=False))
+            else:
+                parts.append(str(error))
         if request_id:
             parts.append(f"request_id={request_id}")
         return " ".join(parts)

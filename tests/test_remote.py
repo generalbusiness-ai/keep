@@ -26,6 +26,22 @@ def test_remote_http_error_includes_daemon_request_id(tmp_path):
     assert "request_id=req-remote" in message
 
 
+def test_remote_http_error_includes_fastapi_detail(tmp_path):
+    """Hosted FastAPI errors retain their actionable ``detail`` message."""
+    keeper = RemoteKeeper("http://localhost:9999", "", StoreConfig(path=tmp_path))
+    request = httpx.Request("POST", "http://localhost:9999/v1/flow")
+    response = httpx.Response(
+        403,
+        json={"detail": "Admin access required for system documents"},
+        request=request,
+    )
+
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        keeper._raise_for_status(response)
+
+    assert "Admin access required for system documents" in str(excinfo.value)
+
+
 def test_remote_streaming_http_error_reads_request_id(tmp_path):
     keeper = RemoteKeeper("http://localhost:9999", "", StoreConfig(path=tmp_path))
     request = httpx.Request("GET", "http://localhost:9999/v1/export")

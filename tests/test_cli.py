@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -917,8 +917,79 @@ class TestShellQuoteId:
 
 
 # -----------------------------------------------------------------------------
-# Command Alias Tests
+# Edit Tests
 # -----------------------------------------------------------------------------
+
+
+def test_remote_edit_system_note_surfaces_admin_permission_error(tmp_path, monkeypatch):
+    """A hosted prompt-edit denial explains the permission the user needs."""
+    import httpx
+
+    from keep import cli_app
+    from keep.config import StoreConfig
+    from keep.remote import RemoteKeeper
+
+    store = tmp_path / "store"
+    store.mkdir()
+    _write_test_store_config(store)
+    with (store / "keep.toml").open("a", encoding="utf-8") as fh:
+        fh.write(
+            "\n[remote]\n"
+            "api_url = \"https://api.example.test\"\n"
+            "api_key = \"kn_test\"\n"
+            "project = \"first-user\"\n"
+        )
+
+    config = StoreConfig(path=store, config_dir=store)
+    remote = RemoteKeeper("https://api.example.test", "kn_test", config)
+    request = httpx.Request("POST", "https://api.example.test/v1/flow")
+    remote._client = SimpleNamespace(
+        request=MagicMock(side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "status": "done",
+                    "bindings": {},
+                    "data": {
+                        "item": {
+                            "id": ".prompt/agent/reflect",
+                            "summary": "original prompt",
+                            "tags": {},
+                        },
+                    },
+                },
+                request=request,
+            ),
+            httpx.Response(
+                403,
+                json={"detail": "Admin access required for system documents"},
+                request=request,
+            ),
+        ]),
+        close=MagicMock(),
+    )
+
+    def save_changed_content(command, *, check):
+        assert check is True
+        Path(command[1]).write_text("custom prompt", encoding="utf-8")
+
+    monkeypatch.delenv("KEEP_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("KEEPNOTES_API_KEY", raising=False)
+    monkeypatch.setattr(cli_app, "_get_remote_keeper", lambda: remote)
+    monkeypatch.setattr(cli_app.sp, "run", save_changed_content)
+
+    try:
+        result = CliRunner().invoke(
+            app,
+            ["--store", str(store), "edit", ".prompt/agent/reflect"],
+            catch_exceptions=False,
+        )
+    finally:
+        remote.close()
+
+    assert result.exit_code == 1
+    assert "Admin access required for system documents" in result.stderr
+
 
 # -----------------------------------------------------------------------------
 # Directory Put Tests

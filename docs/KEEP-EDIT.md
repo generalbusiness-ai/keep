@@ -30,6 +30,11 @@ EDITOR=code keep edit .ignore        # Use VS Code
 
 System docs (`.ignore`, `.prompt/*`, `.state/*`) store their full content as the summary, so `keep edit` gives you the complete document.
 
+When using the hosted service, editing any dot-prefixed system note requires an
+API key with the `admin` permission. A read/write key can view these notes but
+receives `403 Forbidden` when saving them. Select `admin` when creating the key,
+configure keep to use that key, and then rerun `keep edit`.
+
 ## See Also
 
 - [KEEP-PUT.md](KEEP-PUT.md) — Creating and updating notes
