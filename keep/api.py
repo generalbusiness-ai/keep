@@ -342,19 +342,17 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
             logger.info("Cosine migration detected — enqueuing reindex")
             try:
                 stats = self.enqueue_reindex()
-                print(
-                    f"Search index migrated to cosine similarity.\n"
-                    f"Search is unavailable until reindex completes.\n"
-                    f"Run: keep daemon",
-                    file=sys.stderr,
+                self._notify(
+                    "Search index migrated to cosine similarity.\n"
+                    "Search is unavailable until reindex completes.\n"
+                    "Run: keep daemon"
                 )
             except Exception as e:
                 logger.error("Failed to enqueue reindex after cosine migration: %s", e)
-                print(
-                    f"ERROR: Search index migration failed. Search may not work.\n"
-                    f"Try: keep daemon --reindex\n"
-                    f"Details: {e}",
-                    file=sys.stderr,
+                self._notify(
+                    "ERROR: Search index migration failed. Search may not work.\n"
+                    "Try: keep daemon --reindex\n"
+                    f"Details: {e}"
                 )
         chroma_coll = self._resolve_chroma_collection()
         doc_coll = self._resolve_doc_collection()
@@ -437,6 +435,24 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         self._work_queue_lock = threading.Lock()
         self._write_context_by_id: dict[str, dict[str, Any]] = {}
         self._write_context_lock = threading.Lock()
+
+    def _notify(self, message: str, *, flush: bool = False) -> None:
+        """Write an operator notice to stderr, for local CLI Keepers only.
+
+        Startup migrations need to tell a person at a terminal why search is
+        briefly unavailable and what to run next.  A hosted Keeper has no
+        terminal and no one to read it: the advice ("Run: keep daemon") does
+        not apply there, and its stderr is drained by a log agent that files
+        every unstructured line as an error.  So the notice is suppressed
+        when `_is_local` is False.
+
+        This is a *second* channel, never the only one — every caller also
+        records the same event through `logger`, which is what a hosted
+        deployment actually reads.  Keep it that way when adding notices.
+        """
+        if not self._is_local:
+            return
+        print(message, file=sys.stderr, flush=flush)
 
     def _apply_file_size_limit(self, provider: DocumentProvider) -> None:
         """Apply max_file_size config to file-based providers."""
@@ -983,11 +999,14 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         versions = stats.get("versions", 0)
         parts = stats.get("parts", 0)
         if enqueued:
-            print(
+            logger.info(
+                "Queued embedding task-type migration: %d items, %d versions, %d parts",
+                enqueued, versions, parts,
+            )
+            self._notify(
                 f"Queued embedding task-type migration for "
                 f"{enqueued} items + {versions} versions + {parts} parts "
-                f"(background)...",
-                file=sys.stderr,
+                f"(background)..."
             )
         self._config.embed_task_reindex_done = True
         try:
@@ -1141,10 +1160,12 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
         )
         if marker_migration_state is True:
             try:
-                print(
+                logger.info(
+                    "Migrating search metadata to multivalue tag markers"
+                )
+                self._notify(
                     "Migrating search metadata to multivalue tag markers "
                     "(this may take a while on larger stores)...",
-                    file=sys.stderr,
                     flush=True,
                 )
                 stats = _call_with_optional_doc_store(
@@ -1154,19 +1175,17 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                     "Tag marker migration complete: %d docs, %d versions, %d parts",
                     stats["docs"], stats["versions"], stats["parts"],
                 )
-                print(
+                self._notify(
                     "Search metadata migrated to multivalue tag markers "
-                    f"({stats['docs']} docs, {stats['versions']} versions, {stats['parts']} parts).",
-                    file=sys.stderr,
+                    f"({stats['docs']} docs, {stats['versions']} versions, {stats['parts']} parts)."
                 )
                 self._mark_chroma_tag_markers_verified()
             except Exception as e:
                 logger.warning("Tag marker migration failed: %s", e)
-                print(
+                self._notify(
                     "WARNING: tag metadata migration failed; "
                     "tag-filtered semantic search may be incomplete.\n"
-                    "Run: keep daemon --reindex",
-                    file=sys.stderr,
+                    "Run: keep daemon --reindex"
                 )
         elif marker_migration_state is False:
             self._mark_chroma_tag_markers_verified()
@@ -1614,21 +1633,19 @@ class Keeper(ProviderLifecycleMixin, BackgroundProcessingMixin, SearchAugmentati
                         f" search index was cleared."
                         if stored.dimension != current.dimension else ""
                     )
-                    print(
+                    self._notify(
                         f"Embedding model changed.{dim_msg}\n"
                         f"Enqueued {stats['enqueued']} items for reindex.\n"
-                        f"Search is unavailable until reindex completes.\n"
-                        f"Run: keep daemon",
-                        file=sys.stderr,
+                        "Search is unavailable until reindex completes.\n"
+                        "Run: keep daemon"
                     )
                 except Exception as e:
                     logger.error("Failed to enqueue reindex after model change: %s", e)
-                    print(
-                        f"ERROR: Embedding model changed but reindex failed.\n"
-                        f"Search will not work until reindex completes.\n"
-                        f"Try: keep daemon --reindex\n"
-                        f"Details: {e}",
-                        file=sys.stderr,
+                    self._notify(
+                        "ERROR: Embedding model changed but reindex failed.\n"
+                        "Search will not work until reindex completes.\n"
+                        "Try: keep daemon --reindex\n"
+                        f"Details: {e}"
                     )
             else:
                 logger.debug(

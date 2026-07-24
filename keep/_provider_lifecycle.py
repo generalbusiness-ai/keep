@@ -37,6 +37,7 @@ class ProviderLifecycleMixin:
     - _store: VectorStoreProtocol
     - _document_store: DocumentStoreProtocol
     - _validate_embedding_identity(provider): method
+    - _notify(message, *, flush=False): method — operator notice, local-only
     """
 
     def _get_embedding_provider(self) -> "EmbeddingProvider":
