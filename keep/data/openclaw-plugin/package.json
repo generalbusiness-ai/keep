@@ -1,6 +1,6 @@
 {
   "name": "@generalbusiness-ai/keep",
-  "version": "0.162.0",
+  "version": "0.162.1",
   "description": "keep — reflective memory plugin for OpenClaw (context engine + memory tools)",
   "type": "module",
   "license": "MIT",
