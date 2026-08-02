@@ -96,16 +96,19 @@ daemon lifecycle, MCP stdio startup, bulk directory ingestion, and data
 import/export. Those commands may construct a local `Keeper` or use local graph
 helpers, but that is an explicit exception to the daemon-backed command path.
 
-**[mcp.py](keep/mcp.py)** — MCP stdio server
-- `KeepFastMCP` subclass of `FastMCP`
+**[mcp_surface.py](keep/mcp_surface.py) / [mcp.py](keep/mcp.py)** — shared MCP contract and stdio adapter
+- SDK v2 `MCPServer` with MCP 2026-07-28 and legacy 2025-11-25 negotiation
 - Three tools: `keep_flow`, `keep_prompt`, `keep_help`
 - Dynamic prompt exposure: prompt docs tagged with `mcp_prompt` become native
   MCP prompts (protocol-level `list_prompts` / `get_prompt`)
 - MCP resources: `keep://now` (current note) and `keep://{id}` (any note by ID)
-- Thin HTTP layer — every operation delegates to the daemon via `_post` /
-  `_get`. No local Keeper, no models, no database.
-- Structured output: `keep_prompt` returns `CallToolResult` with
-  `structuredContent`
+- `mcp_surface.py` owns schemas, annotations, structured results, prompts,
+  resources, and protocol errors so local and hosted deployments cannot drift
+- `mcp.py` is a thin async adapter: blocking REST calls run in worker threads
+  and delegate to the daemon or configured hosted backend. No local Keeper,
+  models, or database.
+- Structured output: `keep_flow` and `keep_prompt` return `CallToolResult` with
+  `structuredContent`; flow failures use MCP tool-error semantics
 
 **[langchain/](keep/langchain/)** — Framework adapters
 - `KeepStore` (LangGraph `BaseStore` adapter)

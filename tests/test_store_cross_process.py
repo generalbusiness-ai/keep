@@ -30,7 +30,9 @@ def store_path():
 @pytest.fixture
 def store(store_path):
     """Create a ChromaStore instance for testing."""
-    return ChromaStore(store_path, embedding_dimension=4)
+    instance = ChromaStore(store_path, embedding_dimension=4)
+    yield instance
+    instance.close()
 
 
 @pytest.fixture
@@ -54,9 +56,9 @@ class TestEpochSentinel:
 
     def test_epoch_starts_at_zero(self, store_path):
         """New store has no epoch file and _last_epoch == 0."""
-        store = ChromaStore(store_path, embedding_dimension=4)
-        assert store._last_epoch == 0.0
-        assert not (store_path / ".chroma.epoch").exists()
+        with ChromaStore(store_path, embedding_dimension=4) as store:
+            assert store._last_epoch == 0.0
+            assert not (store_path / ".chroma.epoch").exists()
 
     def test_write_creates_epoch_file(self, store, store_path, sample_embedding):
         """First write creates the .chroma.epoch sentinel file."""
@@ -256,6 +258,38 @@ class TestCrossInstanceVisibility:
 
         a.close()
         b.close()
+
+    def test_closing_unrelated_store_does_not_evict_live_system(
+        self, store_path, sample_embedding,
+    ):
+        """A stale store destructor must not clear another path's System."""
+        first = ChromaStore(store_path / "first", embedding_dimension=4)
+        second = ChromaStore(store_path / "second", embedding_dimension=4)
+        second.upsert("test", "doc:1", sample_embedding, "Still live", {})
+
+        first.close()
+
+        assert second.get("test", "doc:1") is not None
+        second.upsert("test", "doc:2", sample_embedding, "Still writable", {})
+        assert second.count("test") == 2
+        second.close()
+
+    def test_closing_shared_store_keeps_other_lease_live(
+        self, store_path, sample_embedding,
+    ):
+        """Closing one same-path store must not stop its peer's System."""
+        first = ChromaStore(store_path, embedding_dimension=4)
+        second = ChromaStore(store_path, embedding_dimension=4)
+        shared_system = first._client_system
+        assert second._client_system is shared_system
+
+        first.close()
+
+        second.upsert("test", "doc:1", sample_embedding, "Still writable", {})
+        assert second.get("test", "doc:1") is not None
+        assert ChromaStore._system_leases[id(shared_system)][1] == 1
+        second.close()
+        assert id(shared_system) not in ChromaStore._system_leases
 
 
 # -----------------------------------------------------------------------------

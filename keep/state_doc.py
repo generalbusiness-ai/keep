@@ -541,7 +541,18 @@ def _eval_sequence(
                 except (AsyncActionEncountered, SubflowExecutionError):
                     raise  # flow runtime handles delegation
                 except Exception as exc:
-                    logger.warning("Action %s failed: %s", rule.do, exc)
+                    # Flow bindings intentionally preserve partial results, but
+                    # operators still need the originating stack to diagnose a
+                    # failed action. Log parameter names only: values can hold
+                    # private note content or credentials.
+                    logger.warning(
+                        "Action %s (rule %s, params=%s) failed: %s",
+                        rule.do,
+                        rule.id,
+                        sorted(params),
+                        exc,
+                        exc_info=True,
+                    )
                     error_output = {"error": str(exc)}
                     if rule.id:
                         bindings[rule.id] = error_output
@@ -601,7 +612,16 @@ def _eval_all(
                 except (AsyncActionEncountered, SubflowExecutionError):
                     raise  # flow runtime handles delegation
                 except Exception as exc:
-                    logger.warning("Action %s failed: %s", rule.do, exc)
+                    # See the sequence evaluator above: retain protocol-level
+                    # partial results without discarding diagnostic causality.
+                    logger.warning(
+                        "Action %s (rule %s, params=%s) failed: %s",
+                        rule.do,
+                        rule.id,
+                        sorted(params),
+                        exc,
+                        exc_info=True,
+                    )
                     error_output = {"error": str(exc)}
                     if rule.id:
                         bindings[rule.id] = error_output

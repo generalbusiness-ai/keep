@@ -53,6 +53,13 @@ class ChromaStore:
     Future: This class's public interface could become a Protocol for
     pluggable backends (SQLite+faiss, Postgres+pgvector, etc.)
     """
+
+    # Chroma keeps persistent Systems in a process-global cache but provides
+    # neither per-client close nor reference counting. Track the stores that
+    # share each System so the last owner can stop its Rust bindings without
+    # invalidating another live client for the same path.
+    _system_leases: dict[int, tuple[Any, int]] = {}
+    _system_leases_lock = threading.RLock()
     
     def __init__(self, store_path: Path, embedding_dimension: Optional[int] = None):
         """Initialize or open a ChromaDb store.
@@ -90,6 +97,11 @@ class ChromaStore:
                 allow_reset=True,
             )
         )
+        # Chroma's client exposes its System only through a global cache.
+        # Retain the exact object so closing an older client cannot evict (or
+        # garbage-collect) a newer System registered for the same path.
+        self._client_system = self._client._system
+        self._acquire_client_system()
         
         # Cache of collection handles
         self._collections: dict[str, Any] = {}
@@ -185,9 +197,11 @@ class ChromaStore:
 
         logger.debug("Reloading ChromaDB client (epoch changed)")
         self._collections.clear()
-        # Evict the cached System so PersistentClient creates a fresh one.
-        # Without this, the SharedSystemClient returns the stale system.
-        chromadb.api.client.SharedSystemClient.clear_system_cache()
+        # Evict only this client's still-current System. Chroma's public
+        # ``clear_system_cache`` is test-only and global: using it here lets a
+        # destructor for any old store invalidate every active store path.
+        self._release_client_system(evict=True)
+        self._client = None
         self._client = chromadb.PersistentClient(
             path=str(self._store_path / "chroma"),
             settings=Settings(
@@ -195,6 +209,62 @@ class ChromaStore:
                 allow_reset=True,
             ),
         )
+        self._client_system = self._client._system
+        self._acquire_client_system()
+
+    def _acquire_client_system(self) -> None:
+        """Record this store's ownership of its exact Chroma System."""
+        system = self._client_system
+        key = id(system)
+        with self._system_leases_lock:
+            registered = self._system_leases.get(key)
+            if registered is None:
+                self._system_leases[key] = (system, 1)
+            else:
+                registered_system, count = registered
+                if registered_system is not system:
+                    raise RuntimeError("Chroma System identity collision")
+                self._system_leases[key] = (system, count + 1)
+
+    def _release_client_system(self, *, evict: bool) -> None:
+        """Release this store's System lease and stop its final native owner.
+
+        Reload must evict even while another local store still leases the old
+        System, because the replacement needs the same Chroma cache key. The
+        old System remains alive until those stores reload or close. Ordinary
+        close evicts and stops only when the last same-System owner departs.
+        """
+        if self._client is None or self._client_system is None:
+            return
+        from chromadb.api.shared_system_client import SharedSystemClient
+
+        identifier = self._client._identifier
+        system = self._client_system
+        key = id(system)
+        should_stop = False
+        with self._system_leases_lock:
+            systems = SharedSystemClient._identifier_to_system
+            if evict and systems.get(identifier) is system:
+                systems.pop(identifier, None)
+
+            registered = self._system_leases.get(key)
+            if registered is None or registered[0] is not system:
+                raise RuntimeError("Releasing an unowned Chroma System")
+            remaining = registered[1] - 1
+            if remaining:
+                self._system_leases[key] = (system, remaining)
+            else:
+                self._system_leases.pop(key)
+                if systems.get(identifier) is system:
+                    systems.pop(identifier, None)
+                should_stop = True
+
+        self._client_system = None
+        if should_stop:
+            # Chroma's cache eviction does not close SQLite/HNSW resources.
+            # System.stop() calls RustBindingsAPI.stop(), which deletes the
+            # native bindings and releases their file descriptors.
+            system.stop()
 
     # -------------------------------------------------------------------------
     # Collection management helpers
@@ -1007,14 +1077,13 @@ class ChromaStore:
     def close(self) -> None:
         """Close ChromaDB client and release resources.
 
-        Evicts the shared system cache so the underlying System (hnswlib
-        indices, SQLite connections) can be garbage-collected.
+        Evicts only this client's current cache entry so unrelated stores and
+        newer clients for the same path remain valid.
         """
         with self._state_lock:
             self._collections.clear()
             if self._client is not None:
-                import chromadb.api.client
-                chromadb.api.client.SharedSystemClient.clear_system_cache()
+                self._release_client_system(evict=False)
                 self._client = None
 
     def __enter__(self):

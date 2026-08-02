@@ -4,6 +4,10 @@ MCP (Model Context Protocol) server for AI agent integration.
 
 Provides MCP access to keep's reflective memory, using a local interface (stdio).
 
+The server uses MCP 2026-07-28 when the client supports the final protocol and
+keeps the 2025-11-25 initialization path for existing hosts. The SDK negotiates
+the era; configuration is identical for both.
+
 ## Quick Start
 
 ```bash
@@ -110,11 +114,17 @@ Three tools:
 
 | Tool | Description | Annotations |
 |------|-------------|-------------|
-| `keep_flow` | Run any operation as a state-doc flow | idempotent |
+| `keep_flow` | Run any operation as a state-doc flow | may mutate, may be destructive, not generally idempotent |
 | `keep_prompt` | Render an agent prompt with context injected | read-only |
 | `keep_help` | Browse keep documentation | read-only |
 
 All operations (search, put, get, tag, delete, move, stats) go through `keep_flow` with named state docs. See [FLOW-ACTIONS.md](use keep_help with topic="flow-actions") for the full action reference.
+
+Tool calls return both text content and typed `structuredContent`. A failed
+flow is an MCP tool error (`isError: true`), so clients do not have to parse an
+`Error:` string to distinguish failure from a successful result. List results
+use private, zero-duration cache hints because prompt and note catalogs can
+change between calls.
 
 ## Resources
 
@@ -156,9 +166,9 @@ Common state docs:
 | `get` | Retrieve note-first output with tags plus similar/meta/versions/edges context | `item_id` |
 | `find-deep` | Search with edge traversal | `query` |
 | `put` | Store content or index a URI | `content` or `uri`, `tags`, `id` |
-| `tag` | Apply tags to one or more items | `id` or `items`, `tags` |
-| `delete` | Remove an item | `id` |
-| `move` | Move versions between items | `name`, `source`, `tags` |
+| `tag` | Apply tags to one or more notes | `id` or `items`, `tags` |
+| `delete` | Remove a note | `id` |
+| `move` | Move versions between notes | `name`, `source`, `tags` |
 | `stats` | Store profiling for query planning | `top_k` |
 
 ### keep_prompt
@@ -166,7 +176,7 @@ Common state docs:
 ```
 name:   "reflect"                  # prompt name (omit to list available)
 text:   "auth flow"                # optional search context
-id:     "now"                      # item for context injection
+id:     "now"                      # note for context injection
 tags:   {"project": "myapp"}       # filter search results
 since:  "P7D"
 scope:  "file:///path/to/dir*"     # constrain results to ID glob

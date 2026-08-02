@@ -41,7 +41,7 @@ def mock_daemon():
 async def _keep_flow_schema(server):
     for tool in await server.list_tools():
         if tool.name == "keep_flow":
-            return tool.inputSchema
+            return tool.input_schema
     raise AssertionError("keep_flow schema not found")
 
 
@@ -65,6 +65,10 @@ class TestKeepFlow:
         assert "item_id" in params_schema["properties"]
         assert "query" in params_schema["properties"]
         assert "content" in params_schema["properties"]
+        assert "source" in params_schema["properties"]
+        assert "source_id" not in params_schema["properties"]
+        assert "deep" in params_schema["properties"]
+        assert "token_budget" in params_schema["properties"]
         assert params_schema["additionalProperties"] is True
         assert schema["properties"]["params"]["examples"][0] == {"item_id": "now"}
 
@@ -77,7 +81,7 @@ class TestKeepFlow:
             "bindings": {}, "history": [], "cursor": None, "tried_queries": [],
         })
         result = await keep_flow(state=STATE_PUT, params={"content": "hello"})
-        parsed = json.loads(result)
+        parsed = result.structured_content
         assert parsed["status"] == "done"
         assert parsed["data"]["id"] == "test-123"
 
@@ -93,7 +97,7 @@ class TestKeepFlow:
         result = await keep_flow(
             state=STATE_QUERY_RESOLVE, params={"query": "test"}, budget=3,
         )
-        parsed = json.loads(result)
+        parsed = result.structured_content
         assert parsed["status"] == "stopped"
         assert parsed["cursor"] == "abc123"
         assert parsed["tried_queries"] == ["test query"]
@@ -104,8 +108,8 @@ class TestKeepFlow:
     async def test_flow_error(self, mock_daemon):
         from keep.mcp import keep_flow
         mock_daemon.return_value = (500, {"error": "bad params"})
-        result = await keep_flow(state=STATE_PUT)
-        assert "Error" in result
+        with pytest.raises(ValueError, match="bad params"):
+            await keep_flow(state=STATE_PUT)
 
     @pytest.mark.asyncio
     async def test_flow_no_data_in_output(self, mock_daemon):
@@ -116,7 +120,7 @@ class TestKeepFlow:
             "cursor": None, "tried_queries": [],
         })
         result = await keep_flow(state=STATE_DELETE, params={"id": "x"})
-        parsed = json.loads(result)
+        parsed = result.structured_content
         assert "data" not in parsed
 
     @pytest.mark.asyncio
@@ -129,10 +133,31 @@ class TestKeepFlow:
             "rendered": "Rendered output text",
         })
         result = await keep_flow(state=STATE_QUERY_RESOLVE, token_budget=4000)
-        assert result == "Rendered output text"
+        assert result.content[0].text == "Rendered output text"
+        assert result.structured_content["rendered"] == "Rendered output text"
         # Verify token_budget was sent in the request
         call_body = mock_daemon.call_args[0][3]  # body arg
         assert call_body.get("token_budget") == 4000
+
+    @pytest.mark.asyncio
+    async def test_rendered_stopped_flow_preserves_resume_cursor(self, mock_daemon):
+        """Token-budget rendering must not discard resumability metadata."""
+        from keep.mcp import keep_flow
+
+        mock_daemon.return_value = (200, {
+            "status": "stopped",
+            "ticks": 3,
+            "data": {"reason": "budget"},
+            "cursor": "resume-123",
+            "tried_queries": ["needle"],
+            "rendered": "Rendered output text",
+        })
+
+        result = await keep_flow(state=STATE_QUERY_RESOLVE, token_budget=4000)
+
+        assert result.structured_content["cursor"] == "resume-123"
+        assert result.structured_content["data"] == {"reason": "budget"}
+        assert result.structured_content["tried_queries"] == ["needle"]
 
     @pytest.mark.asyncio
     async def test_flow_uses_shared_discovery_retry_helper(self):
@@ -152,12 +177,138 @@ class TestKeepFlow:
 
                 result = await keep_flow(state=STATE_PUT, params={"content": "hello"})
 
-            parsed = json.loads(result)
+            parsed = result.structured_content
             assert parsed["status"] == "done"
             mock_http.assert_called_once()
             assert mock_http.call_args.args[:3] == ("POST", 9999, "/v1/flow")
         finally:
             mcp_mod._backend = None
+
+
+class TestMCPProtocolContract:
+    """Serialized modern and legacy behavior through the SDK client."""
+
+    @pytest.mark.asyncio
+    async def test_modern_discovery_results_and_annotations(self, mock_daemon):
+        from mcp import Client
+
+        from keep.mcp import mcp
+
+        mock_daemon.return_value = (200, {
+            "status": "done", "ticks": 1, "data": {"prompts": []},
+        })
+
+        async with Client(mcp, mode="2026-07-28", raise_exceptions=True) as client:
+            assert client.protocol_version == "2026-07-28"
+            result = await client.list_tools()
+
+        assert result.result_type == "complete"
+        assert result.ttl_ms == 0
+        assert result.cache_scope == "private"
+        flow_tool = next(tool for tool in result.tools if tool.name == "keep_flow")
+        assert flow_tool.annotations.read_only_hint is False
+        assert flow_tool.annotations.destructive_hint is True
+        assert flow_tool.annotations.idempotent_hint is False
+        assert mcp._lowlevel_server.get_request_handler("subscriptions/listen") is None
+
+    @pytest.mark.asyncio
+    async def test_legacy_client_remains_supported(self, mock_daemon):
+        from mcp import Client
+
+        from keep.mcp import mcp
+
+        mock_daemon.return_value = (200, {
+            "status": "done", "ticks": 1, "data": {"prompts": []},
+        })
+
+        async with Client(mcp, mode="legacy") as client:
+            assert client.protocol_version == "2025-11-25"
+            result = await client.list_tools()
+
+        assert [tool.name for tool in result.tools] == [
+            "keep_flow", "keep_prompt", "keep_help",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_flow_failure_is_a_tool_error(self, mock_daemon):
+        from mcp import Client
+
+        from keep.mcp import mcp
+
+        mock_daemon.return_value = (500, {"error": "bad params"})
+
+        async with Client(mcp, mode="2026-07-28", raise_exceptions=True) as client:
+            result = await client.call_tool("keep_flow", {"state": "put"})
+
+        assert result.is_error is True
+        assert "bad params" in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_legacy_source_id_is_forwarded_as_canonical_source(self, mock_daemon):
+        from mcp import Client
+
+        from keep.mcp import mcp
+
+        mock_daemon.return_value = (200, {
+            "status": "done", "ticks": 1, "data": {"id": "archive"},
+        })
+
+        async with Client(mcp, mode="2026-07-28", raise_exceptions=True) as client:
+            result = await client.call_tool(
+                "keep_flow",
+                {"state": "move", "params": {"name": "archive", "source_id": "source-note"}},
+            )
+
+        assert result.is_error is False
+        request_body = next(
+            call.args[3]
+            for call in mock_daemon.call_args_list
+            if call.args[3].get("state") == "move"
+        )
+        assert request_body["params"]["source"] == "source-note"
+        assert "source_id" not in request_body["params"]
+
+    @pytest.mark.asyncio
+    async def test_http_routing_headers_trim_optional_whitespace(self):
+        from keep.mcp_surface import MCPHTTPHeaderNormalizer
+
+        captured = {}
+
+        async def downstream(scope, receive, send):
+            del receive
+            captured["headers"] = scope["headers"]
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        app = MCPHTTPHeaderNormalizer(downstream)
+        await app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": [
+                    (b"mcp-method", b" tools/call\t"),
+                    (b"mcp-name", b"  keep_help  "),
+                    (b"x-unrelated", b"  preserve  "),
+                ],
+            },
+            receive,
+            send,
+        )
+
+        assert captured["headers"] == [
+            (b"mcp-method", b"tools/call"),
+            (b"mcp-name", b"keep_help"),
+            (b"x-unrelated", b"  preserve  "),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +332,7 @@ class TestKeepPrompt:
             "bindings": {}, "history": [], "cursor": None, "tried_queries": [],
         })
         result = await keep_prompt()
-        assert result.structuredContent == {
+        assert result.structured_content == {
             "mode": "list",
             "prompts": [
                 {"name": "reflect", "summary": "The reflection practice"},
@@ -200,7 +351,7 @@ class TestKeepPrompt:
             "bindings": {}, "history": [], "cursor": None, "tried_queries": [],
         })
         result = await keep_prompt(name="reflect")
-        assert result.structuredContent == {
+        assert result.structured_content == {
             "mode": "render",
             "name": "reflect",
             "text": "Reflect on your recent work...",
@@ -216,8 +367,8 @@ class TestKeepPrompt:
             "bindings": {}, "history": [], "cursor": None, "tried_queries": [],
         })
         result = await keep_prompt(name="nonexistent")
-        assert result.isError is True
-        assert result.structuredContent == {
+        assert result.is_error is True
+        assert result.structured_content == {
             "mode": "render",
             "name": "nonexistent",
             "error": "prompt not found: nonexistent",
@@ -232,12 +383,12 @@ class TestKeepPrompt:
 
         result = await keep_prompt(name="reflect")
 
-        assert result.isError is True
-        assert result.structuredContent == {
+        assert result.is_error is True
+        assert result.structured_content == {
             "mode": "error",
-            "error": "Error: bad upstream",
+            "error": "bad upstream",
         }
-        assert result.content[0].text == "Error: bad upstream"
+        assert result.content[0].text == "bad upstream"
 
 
 class TestMCPPromptExposure:
@@ -357,7 +508,9 @@ class TestMCPPromptExposure:
             "tried_queries": [],
         })
 
-        with pytest.raises(ValueError, match="prompt not found: nonexistent"):
+        from mcp import MCPError
+
+        with pytest.raises(MCPError, match="prompt not found: nonexistent"):
             await mcp.get_prompt("nonexistent")
 
 
@@ -382,7 +535,7 @@ class TestMCPResources:
 
         templates = await mcp.list_resource_templates()
 
-        assert any(template.uriTemplate == "keep://{id}" for template in templates)
+        assert any(template.uri_template == "keep://{id}" for template in templates)
 
     @pytest.mark.asyncio
     async def test_read_now_resource_returns_note_json(self, mock_daemon):
@@ -414,6 +567,17 @@ class TestMCPResources:
         data = json.loads(contents[0].content)
         assert data["id"] == "file:///tmp/note.md"
         assert mock_daemon.call_args.args[2] == "/v1/notes/file%3A%2F%2F%2Ftmp%2Fnote.md"
+
+    @pytest.mark.asyncio
+    async def test_missing_resource_uses_protocol_error(self, mock_daemon):
+        from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+
+        from keep.mcp import mcp
+
+        mock_daemon.return_value = (404, {"error": "not found"})
+
+        with pytest.raises(ResourceNotFoundError, match="note not found: missing"):
+            await mcp.read_resource("keep://missing")
 
 
 class TestMCPToolDescriptions:
@@ -644,7 +808,7 @@ class TestMCPRemoteBackendRouting:
 
         result = await mcp_mod.keep_flow(state="put", params={"content": "hi"})
 
-        parsed = json.loads(result)
+        parsed = result.structured_content
         assert parsed["status"] == "done"
         assert mock_client.request.called
         args, _ = mock_client.request.call_args

@@ -624,6 +624,32 @@ post:
 
 class TestBugfixes:
     """Tests for state document bug fixes."""
+
+    @pytest.mark.parametrize("match", ["sequence", "all"])
+    def test_action_failure_logs_origin_without_parameter_values(self, caplog, match):
+        """Partial flow failures retain a useful, content-safe traceback."""
+        body = f"""
+match: {match}
+rules:
+  - id: broken
+    do: find
+    with:
+      query: private-note-content
+      limit: 3
+"""
+        doc = parse_state_doc("diagnostic-flow", body)
+
+        def failing_action(name, params):
+            raise RuntimeError("backend unavailable")
+
+        with caplog.at_level(logging.WARNING, logger="keep.state_doc"):
+            result = evaluate_state_doc(doc, {}, run_action=failing_action)
+
+        assert result.bindings["broken"] == {"error": "backend unavailable"}
+        assert "Action find (rule broken, params=['limit', 'query']) failed" in caplog.text
+        assert "Traceback (most recent call last)" in caplog.text
+        assert "private-note-content" not in caplog.text
+
     def test_action_without_id_still_executes(self):
         """Bug #1: run_action was gated on rule.id, skipping id-less actions."""
         body = """
