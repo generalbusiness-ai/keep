@@ -39,17 +39,23 @@ dependencies = [
     # Mistral providers (embeddings, chat, OCR) use the REST API directly via httpx
     # — no mistralai SDK dependency.
     # Document extraction
-    # Security floor for PYSEC-2026-175/177/178/179 in PyJWT.
-    "pyjwt>=2.13.0",
-    # Security floor: CVE-2026-48155/48156/48735/49460/49461/54530/54531 and
-    # GHSA-jm82-fx9c-mx94 (crafted-PDF resource-exhaustion DoS), fixed by 6.13.3.
-    "pypdf>=6.13.3",
+    # Security floor: PYSEC-2026-4140..4152 and PYSEC-2026-4183 (JWK/JWKS
+    # key-handling, algorithm-confusion and claim-validation fixes). The
+    # advisories name 2.14.0/2.15.0 as fixed, but PYSEC-2026-4146 (decode()
+    # mutating a reused options dict, bypassing claim checks) is only clear
+    # from 2.15.1. Pulled in transitively via mcp[crypto] and google-auth;
+    # keep itself never calls PyJWT.
+    "pyjwt>=2.15.1",
+    # Security floor: PYSEC-2026-3655/3656/3910..3913 and PYSEC-2026-4153..4160
+    # (crafted-PDF resource-exhaustion DoS: unbounded streams, deep recursion,
+    # quadratic parsing), fixed by 6.19.0.
+    "pypdf>=6.19.0",
     "pypdfium2>=4.0",
     "beautifulsoup4>=4.9",
-    # Security floor: CVE-2026-49476/49477 (CSS selector parser memory
-    # amplification + ReDoS) fixed in 2.8.4. Pulled in transitively via
+    # Security floor: CVE-2026-85999/86000 (further CSS selector parser
+    # resource-exhaustion cases) fixed in 2.9.0. Pulled in transitively via
     # beautifulsoup4.
-    "soupsieve>=2.8.4",
+    "soupsieve>=2.9.0",
     # Security floor: PYSEC-2026-2132 (command injection via click.edit())
     # fixed in 8.3.3. Pulled in transitively via typer/chromadb.
     "click>=8.3.3",
@@ -65,8 +71,10 @@ dependencies = [
     "Pillow>=12.3.0",
     # Remote API client
     "httpx>=0.27,<1.0",
-    # Security floor for transitive users of requests/google-auth stacks.
-    "urllib3>=2.7.0",
+    # Security floor: CVE-2026-97687/97688/97689 (streaming API memory
+    # exhaustion on chunked and compressed responses) fixed in 2.8.0. Pulled
+    # in transitively via the requests/google-auth stacks.
+    "urllib3>=2.8.0",
     # Security floor: CVE-2026-45409 (idna.encode DoS) fixed in 3.15.
     "idna>=3.15",
     # MCP stdio server. SDK v2 implements the final 2026-07-28 protocol while
@@ -86,16 +94,38 @@ dependencies = [
     # Security floor: GHSA-4xgf-cpjx-pc3j (secrets_dir symlink traversal)
     # fixed in 2.14.2. Pulled in transitively via mcp.
     "pydantic-settings>=2.14.2",
-    # Security floor: GHSA-537c-gmf6-5ccf (statically linked OpenSSL advisory
-    # 2026-06-09) fixed in 48.0.1. Pulled in transitively via pyjwt/auth stacks.
-    "cryptography>=48.0.1",
+    # Security floor: CVE-2026-69247 fixed in 50.0.0. Pulled in transitively
+    # via pyjwt/auth stacks.
+    "cryptography>=50.0.0",
     # Security floor: CVE-2026-4539 (Pygments GUID-regex ReDoS) fixed in 2.20.0.
     # Pulled in transitively via rich (typer, pip-audit, chromadb).
     "pygments>=2.20.0",
-    # Security floor: CVE-2026-34993 (CookieJar.load() arbitrary code execution)
-    # and CVE-2026-47265 (cookies leaked across cross-origin redirects), both
-    # fixed in 3.14.0. Pulled in transitively via google-genai and fsspec[http].
-    "aiohttp>=3.14.0",
+    # Security floor: CVE-2026-59881/69243/69244 fixed by 3.14.3. Pulled in
+    # transitively via google-genai and fsspec[http].
+    "aiohttp>=3.14.3",
+    # Security floor: CVE-2026-104874 (unreclaimable memory leak in the C
+    # items-view union/subtraction operators) fixed in 6.9.1. Pulled in
+    # transitively via aiohttp/yarl.
+    "multidict>=6.9.1",
+    # Security floor: CVE-2026-63374 (IDNA 2003 hostname accepted during TLS
+    # verification) and CVE-2026-64847 (process-pool stderr pipe deadlock)
+    # fixed in 4.14.2. Used directly by keep/mcp.py and transitively by httpx
+    # and the provider SDKs.
+    "anyio>=4.14.2",
+    # Security floor: CVE-2026-84378..84382 (SSE quadratic parsing, multipart
+    # header injection, request-smuggling framing, plaintext wss:// over
+    # SOCKS5, decompression memory amplification) fixed by httpx2 2.12.0 and
+    # httpcore2 2.10.0. Pulled in transitively via mcp.
+    "httpx2>=2.12.0",
+    "httpcore2>=2.10.0",
+    # Security floor: CVE-2026-104851 (ReferenceFileSystem renders untrusted
+    # reference JSON through unsandboxed Jinja2, giving code execution) fixed
+    # in 2026.6.0. Pulled in transitively via huggingface-hub (tokenizers).
+    "fsspec>=2026.6.0",
+    # Security floor: CVE-2026-49265 (PKCE verifier timing side channel) fixed
+    # in 4.0.0. Pulled in transitively via chromadb -> kubernetes ->
+    # requests-oauthlib.
+    "oauthlib>=4.0.0",
     # CEL predicates for state-doc rules
     "common-expression-language>=0.5",
     # Interactive CLI prompts (setup wizard)
