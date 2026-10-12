@@ -78,7 +78,14 @@ def main() -> None:
     subprocess.run(["uv", "lock"], cwd=ROOT, check=True)
 
     # Rebuild the OpenClaw plugin so dist/index.js matches the new version.
+    # dist/index.js bundles @modelcontextprotocol/sdk and its dependencies, so
+    # install exactly what package-lock.json pins first. Without `npm ci` the
+    # bundle is built from whatever node_modules happens to be on disk, and a
+    # lockfile security bump silently fails to reach the published wheel
+    # (this happened in v0.163.1).
     plugin_dir = ROOT / "keep" / "data" / "openclaw-plugin"
+    print("\nInstalling locked OpenClaw plugin dependencies ...")
+    subprocess.run(["npm", "ci"], cwd=plugin_dir, check=True)
     print("\nRebuilding OpenClaw plugin ...")
     subprocess.run(["node", "build.mjs"], cwd=plugin_dir, check=True)
 

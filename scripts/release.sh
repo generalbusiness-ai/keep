@@ -14,7 +14,7 @@
 #   5. Upload to PyPI via twine
 #   6. Create GitHub release with formatted notes
 #
-# Requires: python3, uv, gh, git
+# Requires: python3, uv, gh, git, node + npm (bump_version.py runs `npm ci`)
 # PyPI credentials: ~/.pypirc or TWINE_USERNAME/TWINE_PASSWORD env vars
 
 set -euo pipefail
