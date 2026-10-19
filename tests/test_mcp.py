@@ -106,9 +106,13 @@ class TestKeepFlow:
 
     @pytest.mark.asyncio
     async def test_flow_error(self, mock_daemon):
+        from mcp.server.mcpserver.exceptions import ToolError
+
         from keep.mcp import keep_flow
         mock_daemon.return_value = (500, {"error": "bad params"})
-        with pytest.raises(ValueError, match="bad params"):
+        # ToolError, so the SDK forwards the message to the agent instead of
+        # masking it as a generic "Error executing tool" (SDK >= 2.1).
+        with pytest.raises(ToolError, match="bad params"):
             await keep_flow(state=STATE_PUT)
 
     @pytest.mark.asyncio

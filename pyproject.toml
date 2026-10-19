@@ -63,7 +63,10 @@ dependencies = [
     "python-docx>=1.0",
     "python-pptx>=1.0",
     # Audio metadata
-    "tinytag>=2.2.1",
+    # Security floor: CVE-2026-104266 (M4A `----` atom with a zero-size
+    # sub-atom sends the parser into an infinite loop; DoS on any file keep is
+    # asked to index) fixed in 2.3.0.
+    "tinytag>=2.3.0",
     # Image metadata
     # Security floor: PYSEC-2026-2253/2254/2255/2256/2257 (decompression-bomb
     # check bypasses in PCF/BDF/GD loaders; Windows viewer shell injection)
@@ -80,7 +83,12 @@ dependencies = [
     # MCP stdio server. SDK v2 implements the final 2026-07-28 protocol while
     # retaining automatic compatibility with pre-2026 clients on the same
     # endpoint. Keep the major bounded so future wire/API breaks are explicit.
-    "mcp>=2.0.0,<3.0",
+    # Security floor: CVE-2026-59951 (stateful Streamable HTTP sessions were
+    # never reclaimed, so any client could grow server memory without bound)
+    # fixed in 2.2.0. keep itself serves MCP over stdio only, and the hosted
+    # server passes stateless_http=True, so neither is exposed; the floor keeps
+    # the audit clean and protects any embedder that mounts the HTTP app.
+    "mcp>=2.2.0,<3.0",
     "pydantic>=2.0,<3.0",
     # Security floor for transitive consumers via uvicorn[standard] / pydantic-settings.
     "python-dotenv>=1.2.2",

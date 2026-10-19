@@ -16,7 +16,7 @@ from urllib.parse import unquote
 
 from mcp import MCPError
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.server.mcpserver.exceptions import ResourceNotFoundError, ToolError
 from mcp.types import (
     CallToolResult,
     GetPromptResult,
@@ -263,9 +263,11 @@ class KeepMCPServer(MCPServer):
         # MCP SDK 2.0.0 installs ``subscriptions/listen`` unconditionally and
         # therefore advertises listChanged/resource-subscribe capabilities.
         # Keep's catalogs live behind an external daemon/service, so this
-        # process cannot truthfully publish every mutation. The SDK has no
-        # public opt-out yet; remove its optional handler until keep has a
-        # daemon-owned cross-process event stream to back that promise.
+        # process cannot truthfully publish every mutation. SDK 2.3.0 added
+        # ``MCPServer(subscriptions=False)`` as the public opt-out; use it once
+        # the floor reaches 2.3.0. Until then remove the optional handler
+        # directly, until keep has a daemon-owned cross-process event stream
+        # to back that promise.
         self._lowlevel_server._request_handlers.pop("subscriptions/listen", None)
 
     def streamable_http_app(self, **kwargs: Any) -> ASGIApp:
@@ -488,11 +490,16 @@ def create_keep_mcp_surface(service: KeepMCPService, *, version: str) -> KeepMCP
             state_doc_yaml=state_doc_yaml,
             token_budget=token_budget,
         )
+        # Raise ToolError, not a plain exception: since MCP SDK 2.1 an
+        # unexpected handler exception reaches the client only as
+        # "Error executing tool keep_flow" (the detail goes to the server log),
+        # whereas ToolError's message is meant for the model and is passed
+        # through. The agent needs the flow's own error text to recover.
         if response.status_code != 200:
-            raise ValueError(str(response.payload.get("error", "keep service unavailable")))
+            raise ToolError(str(response.payload.get("error", "keep service unavailable")))
         if response.payload.get("status") == "error":
             error = (response.payload.get("data") or {}).get("error", "flow failed")
-            raise ValueError(str(error))
+            raise ToolError(str(error))
 
         if response.payload.get("rendered"):
             rendered = str(response.payload["rendered"])

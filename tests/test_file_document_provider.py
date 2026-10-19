@@ -187,3 +187,52 @@ class TestFileBirthtime:
 # ---------------------------------------------------------------------------
 # Part immutability
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Audio metadata (tinytag)
+# ---------------------------------------------------------------------------
+
+
+class TestAudioMetadata:
+    """Audio ingest reads real files through tinytag, not a mocked extractor.
+
+    These exercise the dependency itself so a tinytag upgrade that changes
+    attribute names or parsing behaviour fails here rather than in the field.
+    """
+
+    @pytest.fixture
+    def allow_tmp_path(self, monkeypatch):
+        """tmp_path lives outside $HOME; bypass the home-directory guard."""
+        monkeypatch.setattr(
+            "keep.providers.documents.validate_path_within_home",
+            lambda path: path,
+        )
+
+    def test_wav_metadata_is_extracted(self, tmp_path, allow_tmp_path):
+        """A real WAV yields audio properties as structured text."""
+        import struct
+        import wave
+
+        wav = tmp_path / "tone.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(struct.pack("<" + "h" * 8000, *([0] * 8000)))  # 1 s silence
+
+        doc = FileDocumentProvider().fetch(f"file://{wav}")
+
+        assert doc.content_type == "audio/wav"
+        assert "Duration: 0:01" in doc.content
+        assert "Sample Rate: 8000 Hz" in doc.content
+
+    def test_corrupt_audio_degrades_to_placeholder(self, tmp_path, allow_tmp_path):
+        """Unparseable audio returns the filename placeholder and never hangs."""
+        bad = tmp_path / "garbage.wav"
+        bad.write_bytes(b"RIFF\x10\x00\x00\x00WAVEjunkjunkjunk")
+
+        doc = FileDocumentProvider().fetch(f"file://{bad}")
+
+        assert doc.content_type == "audio/wav"
+        assert doc.content == "Audio file: garbage.wav"
