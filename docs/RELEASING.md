@@ -41,6 +41,23 @@ wrong rather than deferring it.
    no leaked daemons. If a test leaves a daemon running, that is a test bug
    and must be fixed before release.
 
+6. **Dependency security checks pass**
+   Run `cve-lite --verbose` for the nested OpenClaw npm lockfile. Audit the
+   Python dependencies separately, using the same exceptions as
+   `.github/workflows/security.yml`:
+   ```bash
+   uv export --frozen --no-hashes --no-emit-project > /tmp/requirements.txt
+   pip-audit -r /tmp/requirements.txt --desc \
+     --ignore-vuln CVE-2026-45829 \
+     --ignore-vuln CVE-2026-45830 \
+     --ignore-vuln CVE-2026-45831 \
+     --ignore-vuln CVE-2026-45833
+   ```
+   Recheck each exception against current upstream advisories before release.
+   Remove exceptions when fixes become available and raise the affected
+   dependency floors. Check GitHub CI and available security alerts, resolve
+   findings, and rerun the audits locally.
+
 ## Release Numbering
 
 - **Major** is `0` and stays `0`.
@@ -75,7 +92,7 @@ scripts/release.sh 0.131.0        # explicit version
 5. **Upload to PyPI** via `uvx twine upload dist/keep_skill-VERSION*`.
    Credentials come from `~/.pypirc` or `TWINE_USERNAME`/`TWINE_PASSWORD`.
 6. **Create the GitHub release** via `gh release create`. Minor releases
-   get a "What's new" body assembled from `git log` since the last minor
+   get a "What's new" body assembled from `git log` since the last
    tag; patch releases use the release commit's body.
 
 ## Requirements
