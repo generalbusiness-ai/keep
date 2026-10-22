@@ -48,8 +48,9 @@ dependencies = [
     "pyjwt>=2.15.1",
     # Security floor: PYSEC-2026-3655/3656/3910..3913 and PYSEC-2026-4153..4160
     # (crafted-PDF resource-exhaustion DoS: unbounded streams, deep recursion,
-    # quadratic parsing), fixed by 6.19.0.
-    "pypdf>=6.19.0",
+    # quadratic parsing), fixed by 6.19.0. GHSA-5hx5-vpf9-5wcv (unvalidated
+    # JPEG data invoking arbitrary image parsers) requires 6.21.1.
+    "pypdf>=6.21.1",
     "pypdfium2>=4.0",
     "beautifulsoup4>=4.9",
     # Security floor: CVE-2026-85999/86000 (further CSS selector parser
@@ -70,8 +71,9 @@ dependencies = [
     # Image metadata
     # Security floor: PYSEC-2026-2253/2254/2255/2256/2257 (decompression-bomb
     # check bypasses in PCF/BDF/GD loaders; Windows viewer shell injection)
-    # fixed in 12.3.0.
-    "Pillow>=12.3.0",
+    # fixed in 12.3.0. GHSA-462x-pgg6-55fp and the related October image
+    # decoder/encoder memory-safety and resource-exhaustion fixes require 13.0.0.
+    "pillow>=13.0.0",
     # Remote API client
     "httpx>=0.27,<1.0",
     # Security floor: CVE-2026-97687/97688/97689 (streaming API memory
@@ -138,6 +140,9 @@ dependencies = [
     "common-expression-language>=0.5",
     # Interactive CLI prompts (setup wizard)
     "questionary>=2.0",
+    # Security floor: GHSA-6q48-6c7w-9gw2 removes the emSign root whose
+    # intermediate CA keys were compromised. Pulled in via httpx/requests.
+    "certifi>=2026.10.19",
 ]
 
 [project.urls]
