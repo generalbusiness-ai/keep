@@ -1486,10 +1486,22 @@ def _terminate_pid(pid: int) -> None:
         pass
 
 
+def _find_processor_pid_files(root: Path) -> list[Path]:
+    """Find daemon PID files while tolerating concurrently removed directories."""
+    # Detached Git maintenance can remove loose-object directories during test
+    # teardown. Python 3.11 Path.rglob raises on that race; os.walk skips vanished
+    # directories and still visits surviving stores that need daemon cleanup.
+    return sorted(
+        Path(directory) / "processor.pid"
+        for directory, _, files in os.walk(root)
+        if "processor.pid" in files
+    )
+
+
 def _cleanup_daemons_under(root: Path) -> None:
     """Terminate any daemon processes tracked by processor.pid under root."""
     killed: set[int] = set()
-    for pid_file in sorted(root.rglob("processor.pid")):
+    for pid_file in _find_processor_pid_files(root):
         try:
             pid = int(pid_file.read_text().strip())
         except (ValueError, OSError):
@@ -1614,6 +1626,6 @@ def _isolate_test_store_and_cleanup_daemons(request, monkeypatch, tmp_path):
     deadline = time.monotonic() + 2.0
     while True:
         _cleanup_daemons_under(tmp_path)
-        if not any(tmp_path.rglob("processor.pid")) or time.monotonic() >= deadline:
+        if not _find_processor_pid_files(tmp_path) or time.monotonic() >= deadline:
             break
         time.sleep(0.05)
