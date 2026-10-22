@@ -46,8 +46,8 @@ wrong rather than deferring it.
    Python dependencies separately, using the same exceptions as
    `.github/workflows/security.yml`:
    ```bash
-   uv export --frozen --no-hashes --no-emit-project > /tmp/requirements.txt
-   pip-audit -r /tmp/requirements.txt --desc \
+   uv export --frozen --all-extras --no-emit-project > /tmp/requirements.txt
+   pip-audit -r /tmp/requirements.txt --disable-pip --desc \
      --ignore-vuln CVE-2026-45829 \
      --ignore-vuln CVE-2026-45830 \
      --ignore-vuln CVE-2026-45831 \

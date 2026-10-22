@@ -68,7 +68,9 @@ jobs:
         run: pip install pip-audit
       - name: Audit dependencies
         run: |
-          uv export --frozen --no-hashes --no-emit-project > /tmp/requirements.txt
+          # Include optional integrations and local models. Export hashes so
+          # pip-audit can inspect the resolved graph without installing the ML stack.
+          uv export --frozen --all-extras --no-emit-project > /tmp/requirements.txt
           # CVE-2026-45829: chromadb pre-auth RCE on its HTTP server
           #   (/api/v2/.../collections with trust_remote_code). keep only uses
           #   chromadb.PersistentClient (embedded, on-disk) and never runs the
@@ -83,7 +85,7 @@ jobs:
           #   No upstream fix exists (all releases through 1.5.9 affected).
           # Re-check every ignore here before each release: drop it and
           #   raise the chromadb floor as soon as a fixed release ships.
-          pip-audit -r /tmp/requirements.txt --desc \
+          pip-audit -r /tmp/requirements.txt --disable-pip --desc \
             --ignore-vuln CVE-2026-45829 \
             --ignore-vuln CVE-2026-45830 \
             --ignore-vuln CVE-2026-45831 \
