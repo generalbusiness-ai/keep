@@ -33,9 +33,10 @@ dependencies = [
     "anthropic>=0.40.0",
     "google-genai>=1.0.0",
     # Security floor: CVE-2026-59885/59886 (quadratic OID processing and
-    # unbounded REAL exponent conversion) fixed in 0.6.4. Pulled in
-    # transitively through google-auth/rsa.
-    "pyasn1>=0.6.4",
+    # unbounded REAL exponent conversion) fixed in 0.6.4. CVE-2026-119194..119197
+    # (quadratic container, string, BIT STRING and REAL decoding) require 0.6.5.
+    # Pulled in transitively through google-auth/rsa.
+    "pyasn1>=0.6.5",
     # Mistral providers (embeddings, chat, OCR) use the REST API directly via httpx
     # — no mistralai SDK dependency.
     # Document extraction
@@ -50,7 +51,9 @@ dependencies = [
     # (crafted-PDF resource-exhaustion DoS: unbounded streams, deep recursion,
     # quadratic parsing), fixed by 6.19.0. GHSA-5hx5-vpf9-5wcv (unvalidated
     # JPEG data invoking arbitrary image parsers) requires 6.21.1.
-    "pypdf>=6.21.1",
+    # CVE-2026-119203..119209 (crafted-PDF loops and resource exhaustion)
+    # require 6.21.4.
+    "pypdf>=6.21.4",
     "pypdfium2>=4.0",
     "beautifulsoup4>=4.9",
     # Security floor: CVE-2026-85999/86000 (further CSS selector parser
@@ -143,6 +146,13 @@ dependencies = [
     # Security floor: GHSA-6q48-6c7w-9gw2 removes the emSign root whose
     # intermediate CA keys were compromised. Pulled in via httpx/requests.
     "certifi>=2026.10.19",
+    # Security floor: CVE-2026-112907/112909/112910/112913/112915 and
+    # CVE-2026-112935/112936/112939/112940 (lock-path races, unsafe file
+    # handling and permissions) fixed by 4.2.1. Pulled in via huggingface-hub.
+    "filelock>=4.2.1",
+    # Security floor: CVE-2026-114603 (quadratic parsing of untrusted
+    # tracestate headers) fixed in 1.45.1. Pulled in via chromadb.
+    "opentelemetry-api>=1.45.1",
 ]
 
 [project.urls]

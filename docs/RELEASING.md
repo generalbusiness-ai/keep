@@ -58,6 +58,9 @@ wrong rather than deferring it.
    dependency floors. Check GitHub CI and available security alerts, resolve
    findings, and rerun the audits locally.
 
+   After npm lockfile changes, run `npm ci`, `npm run build`, and `npm test` in
+   `keep/data/openclaw-plugin` to verify the bundled plugin.
+
 ## Release Numbering
 
 - **Major** is `0` and stays `0`.
