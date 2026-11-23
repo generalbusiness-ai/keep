@@ -86,7 +86,7 @@ not inherit arbitrary shell environment variables into stdio server processes.
 
 ## Installation
 
-**Python 3.11–3.13.** Use [uv](https://docs.astral.sh/uv/) (recommended) or pip:
+**Python 3.11.5 or newer, through 3.13.** Use [uv](https://docs.astral.sh/uv/) (recommended) or pip:
 
 ```bash
 uv tool install keep-skill        # or: pip install keep-skill

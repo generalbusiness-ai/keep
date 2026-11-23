@@ -7,7 +7,7 @@ name = "keep-skill"
 version = "0.163.5"
 description = "Reflective memory - remember and search documents by meaning"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11.5,<3.14"
 license = {text = "MIT"}
 authors = [{name = "Hugh Pyle"}]
 keywords = ["semantic-memory", "vector-search", "embeddings", "chromadb", "agents", "langchain", "langgraph"]
@@ -57,9 +57,9 @@ dependencies = [
     "pypdfium2>=4.0",
     "beautifulsoup4>=4.9",
     # Security floor: CVE-2026-85999/86000 (further CSS selector parser
-    # resource-exhaustion cases) fixed in 2.9.0. Pulled in transitively via
-    # beautifulsoup4.
-    "soupsieve>=2.9.0",
+    # resource-exhaustion cases) fixed in 2.9.0. CVE-2026-126190 (excessive
+    # CPU use matching descendant selectors) requires 4.0. Pulled in via beautifulsoup4.
+    "soupsieve>=4.0",
     # Security floor: PYSEC-2026-2132 (command injection via click.edit())
     # fixed in 8.3.3. Pulled in transitively via typer/chromadb.
     "click>=8.3.3",
@@ -136,9 +136,9 @@ dependencies = [
     # in 2026.6.0. Pulled in transitively via huggingface-hub (tokenizers).
     "fsspec>=2026.6.0",
     # Security floor: CVE-2026-49265 (PKCE verifier timing side channel) fixed
-    # in 4.0.0. Pulled in transitively via chromadb -> kubernetes ->
-    # requests-oauthlib.
-    "oauthlib>=4.0.0",
+    # in 4.0.0. CVE-2026-49272 (missing device-code validation at the token
+    # endpoint) requires 4.0.1. Pulled in via chromadb -> kubernetes -> requests-oauthlib.
+    "oauthlib>=4.0.1",
     # CEL predicates for state-doc rules
     "common-expression-language>=0.5",
     # Interactive CLI prompts (setup wizard)
